@@ -56,3 +56,16 @@ No guarantees
     to check your various rota designs for banding/compliance, and thus allows
     you to develop something safe and financially reasonable in a shorter time
     and with fewer false starts.
+
+Tips
+
+    - The program produces HTML output; use a web browser to view the rota
+      files generated.
+
+    - Use the '-d' or '--daynums' option to add day numbers (as well as dates)
+      to the rota. This can help when comparing existing/new rotas.
+
+    - Use the '-s' or '--skipanalytics' option to generate a rota very quickly
+      but without the analysis. Iterate through (change code, regenerate,
+      check) quickly until you're satisfied; then remove the '-s' option to
+      perform the full analyses.

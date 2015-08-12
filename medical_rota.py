@@ -3,6 +3,10 @@
 
 """
 
+Medical rota design/checking tool.
+
+    See README.md
+
 Copyright/licensing
 
     Copyright (C) 2015-2015 Rudolf Cardinal (rudolf@pobox.com).
@@ -30,7 +34,7 @@ Single-file format
 
 Version history (see VERSION below)
 
-    1.0 (2015-08-10)
+    1.0 (2015-08-08 to 2015-08-12)
     - First version
 
 """
