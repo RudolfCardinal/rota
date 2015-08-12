@@ -152,7 +152,7 @@ NORMAL_DAY_START_H = 7
 NORMAL_DAY_END_H = 19
 
 COLOURS = AttrDict({
-    "NWD": (51, 160, 44),
+    "NWD": (100, 150, 100),
     "LATE_F": (255, 0, 0),
     "LATE_A": (255, 127, 0),
     "NIGHT_FA": (150, 150, 255),
@@ -2712,7 +2712,7 @@ def cpft_draft_2_combined():
             """
             <b>Advantages:</b>
             <ul>
-                <li><b>Cheaper,</b> by about £61k/y.</li>
+                <li><b>Cheaper,</b> by about £22k/y.</li>
 
                 <li><b>Removes Band 2,</b> which we thought had been disallowed
                 since 2009 at the end of the phased requirement for EWTD
@@ -2733,8 +2733,9 @@ def cpft_draft_2_combined():
                 the NWD coverage, the less their other job/activity is
                 detrimentally impacted.</li>
 
-                <li><b>Resumption of s136 experience for North SpRs,</b> with a
-                corresponding 33% reduction in s136 work for South SpRs.</li>
+                <li><b>Resumption of s136 MHA experience for North SpRs,</b>
+                with a corresponding 33% reduction in s136 work for South
+                SpRs.</li>
 
                 <li><b>Less confusing for switchboards,</b>
                 with a clear SHO/SpR split.</li>
@@ -2753,6 +2754,12 @@ def cpft_draft_2_combined():
             <ul>
                 <li><b>More travel for SpRs.</b></li>
 
+                <li><b>One SpR at night rather than two.</b> This shouldn’t be
+                a problem for Mental Health Act Assessments, since there’s only
+                one AMHP on in any case, so this should only really be relevant
+                if both SHOs are swamped in their respective A&amp;E
+                departments.</li>
+
                 <li><b>SpRs not dedicated to a single
                 location/A&amp;E.</b></li>
 
@@ -2761,7 +2768,12 @@ def cpft_draft_2_combined():
                 <li>The concept of a ‘resident’ SpR covering two areas
                 is a little unusual, though all it really means is ‘available
                 for duty and expected to be working or ready to work at all
-                times’.</li>
+                times’. In any case, the ‘resident’ test only applies to
+                true on-call rotas, not full shift rotas; this is a full
+                shift rota, so we can say that the SpR should be working or
+                ready to work at all times, with the expectation of normal
+                breaks but not of sleep, but where they are is a matter for
+                clinical judgement.</li>
             </ul>
             """,
             """
