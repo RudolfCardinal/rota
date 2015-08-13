@@ -85,7 +85,7 @@ BANK_HOLIDAYS = [datetime.datetime.strptime(x, "%Y-%m-%d").date() for x in [
     # Day is a Sunday, then the Christmas Day substitute bank holiday is Tue 27
     # Dec, after the Boxing Day Monday bank holiday.
 
-    # 2014 (year of CUH Epic launch so no point going earlier)
+    # 2014
     "2014-01-01",  # New Year's Day
     "2014-04-18",  # Good Friday
     "2014-04-21",  # Easter Monday
@@ -618,7 +618,7 @@ class IntervalList(object):
         return self._any_overlap_or_contiguous(test_overlap=True)
 
     def any_contiguous(self):
-        """Are any of the intervals overlap?"""
+        """Are any of the intervals contiguous?"""
         return self._any_overlap_or_contiguous(test_overlap=False)
 
     def get_overlaps(self):
@@ -1540,8 +1540,8 @@ class Doctor(object):
                          + yesno(rest_compliant))
         if not rest_compliant:
             return ("3", decisions)  # BAND 3
-        decisions.append(">48h of actual work [ignores PC; unclear if this is "
-                         "the correct method]? " + yesno(more_than_48h))
+        decisions.append(">48h of actual work (inc. PC)? "
+                         + yesno(more_than_48h))
         if more_than_48h:
             decisions.append("On call rota? " + yesno(on_call_rota))
             if on_call_rota:
@@ -2455,6 +2455,7 @@ def cpft_actual_aug2015_north():
         ],
     )
 
+
 # -----------------------------------------------------------------------------
 # Draft
 # -----------------------------------------------------------------------------
@@ -2694,7 +2695,7 @@ def cpft_draft_2_combined():
                 two night doctors in each region reasonably often, particularly
                 in the North, and two SpRs sometimes).
                 It confuses switchboards by failing to distinguish well
-                between SHOs (CT1–3, Tier 1) and SpRs (CT4–6, Tier 2).
+                between SHOs (CT1–3, Tier 1) and SpRs (ST4–6, Tier 2).
                 These are obvious reasons to split the SpR rota from the SHO
                 rota.</li>
 
@@ -2853,6 +2854,3 @@ Version {}
 if __name__ == '__main__':
     main()
     # test()
-
-# *** README.md
-# *** Github
