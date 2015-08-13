@@ -37,13 +37,17 @@ Version history (see VERSION below)
     1.0 (2015-08-08 to 2015-08-12)
     - First version
 
+    1.1 (2015-08-13)
+    - CPFT Draft 2 rota spread out to be more realistic.
+    - CPFT Draft 3 added.
+
 """
 
 # =============================================================================
 # Version
 # =============================================================================
 
-VERSION = 1.0
+VERSION = 1.1
 
 # =============================================================================
 # Imports
@@ -160,7 +164,11 @@ COLOURS = AttrDict({
     "LATE_P": (102, 255, 255),
     "NIGHT_CP": (153, 51, 255),
     "SPR_LATE": (251, 154, 153),
+    "N_SPR_LATE": (251, 154, 153),
+    "S_SPR_LATE": (0, 150, 150),
     "SPR_NIGHT": (255, 0, 255),
+    "S_SPR_NIGHT": (255, 0, 255),
+    "N_SPR_NIGHT": (0, 255, 0),
     "OFF": (255, 255, 255),
 })
 
@@ -286,7 +294,7 @@ class Interval(object):
     def __init__(self, start, end):
         """Creates the interval."""
         if start is None or end is None:
-            raise AssertionError("Invalid interval creation")
+            raise TypeError("Invalid interval creation")
         if start > end:
             (start, end) = (end, start)
         self.start = start
@@ -525,7 +533,7 @@ class IntervalList(object):
         self.no_contiguous = no_contiguous
         for i in self.intervals:
             if not isinstance(i, Interval):
-                raise AssertionError(
+                raise TypeError(
                     "IntervalList creation failed: contents are not all "
                     "Interval: {}".format(repr(self.intervals)))
         self._tidy()
@@ -554,7 +562,7 @@ class IntervalList(object):
         if interval is None:
             return
         if not isinstance(interval, Interval):
-            raise AssertionError(
+            raise TypeError(
                 "Attempt to insert non-Interval into IntervalList")
         self.intervals.append(interval)
         self._tidy()
@@ -779,7 +787,7 @@ class IntervalList(object):
                     Y---Y                Y---Y
         """
         if flexibility not in [0, 1, 2]:
-            raise AssertionError("subset: bad flexibility value")
+            raise ValueError("subset: bad flexibility value")
         permitted = []
         for i in self.intervals:
             if flexibility == 0:
@@ -919,14 +927,14 @@ class Shift(object):
         self.rgb = rgb
         # Validation
         if not css_compatible(self.name):
-            raise AssertionError(
+            raise ValueError(
                 "Shift name illegal as a CSS name; change it: {}".format(
                     repr(self)))
         if not isinstance(start_time, datetime.time):
-            raise AssertionError(
+            raise TypeError(
                 "Shift time not a datetime.time: {}".format(repr(self)))
         if shift_type not in SHIFT_TYPES.values():
-            raise AssertionError(
+            raise ValueError(
                 "Shift type ({}) must be one of [{}]".format(
                     shift_type, ", ".join(SHIFT_TYPES.values())))
 
@@ -985,8 +993,8 @@ class Shift(object):
                 <th>Shift name</th>
                 <th>Abbreviation</th>
                 <th>Start time</th>
-                <th>Duration (h)</th>
                 <th>End time</th>
+                <th>Duration (h)</th>
                 <th>Shift type</th>
                 <th>Work?</th>
                 <th>Roles</th>
@@ -1002,8 +1010,8 @@ class Shift(object):
                 <td>{name}</td>
                 <td>{abbreviation}</td>
                 <td>{start_time}</td>
-                <td>{duration_h}</td>
                 <td>{end_time}</td>
+                <td>{duration_h}</td>
                 <td>{shift_type}</td>
                 <td>{work}</td>
                 <td>{roles}</td>
@@ -1014,9 +1022,9 @@ class Shift(object):
             name=self.name,
             abbreviation=self.abbreviation,
             start_time=self.start_time.strftime("%H:%M"),
-            duration_h=self.duration_h,
             end_time=(self.get_end_time().strftime("%H:%M")
                       if not self.invalid() else ""),
+            duration_h=self.duration_h,
             shift_type=self.shift_type,
             work="Work" if self.work else "Off",
             roles=", ".join(self.roles),
@@ -1100,7 +1108,7 @@ class Doctor(object):
                 intervals.append(interval)
         il = IntervalList(intervals)
         if il.any_overlap():
-            raise AssertionError(
+            raise ValueError(
                 "Doctor creation failed: overlapping shifts: {}".format(self))
 
     def __repr__(self):
@@ -1852,7 +1860,7 @@ class Rota(object):
                 (see source). Support for this interpretation is given by the
                 RCP London’s (2006, <i>Designing safer rotas for junior
                 doctors</i>) explanation that a rota involving 7 night shifts
-                (each 21:30–09:00) is legitimate (meaning New Deal and EWTD
+                (each 21:00–09:30) is legitimate (meaning New Deal and EWTD
                 compliant) — albeit heavily discouraged on safety grounds.</li>
 
                 <li>Banding supplements are as follows.
@@ -2648,18 +2656,27 @@ def cpft_draft_2_combined():
             north_base_sho.copy("N" + str(i + 1), rotate=i*7))
 
     n_spr = 18  # 18 normal; 12 works at 40%; 11 doesn't quite
+    #
     base_spr = Doctor("BASE_SPR", [
         # Mon ... Sun
         spr_night, spr_night, spr_night, spr_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, spr_late, spr_late, spr_late,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, spr_late, spr_late, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         spr_late, spr_late, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, spr_night, spr_night, spr_night,
         off, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=6)
     base_spr.pad(n_spr * 7, [nwd])
     base_spr.rotate(-2)  # from a Monday start to a Wednesday start
@@ -2788,6 +2805,383 @@ def cpft_draft_2_combined():
     )
 
 
+def cpft_draft_3_split():
+    # Shifts
+    nwd = Shift(
+        "Normal_working_day", "nwd", datetime.time(9), 8, nwd_only=True,
+        resident=True, rgb=COLOURS.NWD)
+    s_sho_late1 = Shift(
+        "S_SHO_Late_1_F", "F", datetime.time(9), 12.5,
+        roles=["Fulbourn SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_F)
+    s_sho_late2 = Shift(
+        "S_SHO_Late_2_A", "A", datetime.time(9), 12.5,
+        roles=["Addenbrooke’s SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_A)
+    s_sho_night = Shift(
+        "S_SHO_Night", "N", datetime.time(21), 12.25,
+        roles=["Fulbourn SHO", "Addenbrooke’s SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.NIGHT_FA)
+    s_spr_night = Shift(
+        "S_SpR_Night", "SN", datetime.time(21), 12.25,
+        roles=["South SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.S_SPR_NIGHT)
+
+    n_sho_late1 = Shift(
+        "N_SHO_Late_1_CC", "C", datetime.time(9), 12.5,
+        roles=["Cavell Centre SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_C)
+    n_sho_late2 = Shift(
+        "N_SHO_Late_2_PCH", "P", datetime.time(9), 12.5,
+        roles=["PCH SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_P)
+    n_sho_night = Shift(
+        "N_SHO_Night", "N", datetime.time(21), 12.25,
+        roles=["Cavell Centre SHO", "PCH SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.NIGHT_CP)
+    n_spr_night = Shift(
+        "N_SpR_Night", "NN", datetime.time(21), 12.25,
+        roles=["North SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.N_SPR_NIGHT)
+
+    spr_late = Shift(
+        "SpR_Late", "L", datetime.time(9), 12.5,
+        roles=["North SpR", "South SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.SPR_LATE)
+
+    off = Shift(
+        "Off", "OFF", datetime.time(9, 15), 7.75, work=False)
+    shifts = [nwd,
+              s_sho_late1, s_sho_late2, s_sho_night, s_spr_night,
+              n_sho_late1, n_sho_late2, n_sho_night, n_spr_night,
+              spr_late,
+              off]
+
+    # Doctors
+    n_south_sho = 14
+    south_base_sho = Doctor("SOUTH_BASE_SHO", [
+        s_sho_night, s_sho_night, s_sho_night, s_sho_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        s_sho_late1, s_sho_late1, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, s_sho_late1, s_sho_late1, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, s_sho_late1, s_sho_late1, s_sho_late1,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        s_sho_late2, s_sho_late2, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, s_sho_late2, s_sho_late2, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, s_sho_late2, s_sho_late2, s_sho_late2,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, s_sho_night, s_sho_night, s_sho_night,
+        off, off, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=5)
+    south_base_sho.pad(n_south_sho * 7, [nwd])
+    south_base_sho.rotate(-2)  # from a Monday start to a Wednesday start
+    south_shos = []
+    for i in range(n_south_sho):
+        south_shos.append(
+            south_base_sho.copy("S" + str(i + 1), rotate=i*7))
+
+    # Doctors
+    n_north_sho = 12
+    north_base_sho = Doctor("NORTH_BASE_SHO", [
+        # The same pattern as the South fails (i.e. yields 2B) because there
+        # are slightly fewer doctors.
+        n_sho_night, n_sho_night, n_sho_night, n_sho_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        n_sho_late1, n_sho_late1, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, n_sho_late1, n_sho_late1, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, n_sho_late1, n_sho_late1, n_sho_late1,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        n_sho_late2, n_sho_late2, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, n_sho_late2, n_sho_late2, off, nwd, nwd,  # INSERT OFF
+        nwd, nwd, nwd, off, n_sho_late2, n_sho_late2, n_sho_late2,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, n_sho_night, n_sho_night, n_sho_night,
+        off, off, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=5)
+    north_base_sho.pad(n_north_sho * 7, [nwd])
+    north_base_sho.rotate(-2)  # from a Monday start to a Wednesday start
+    north_shos = []
+    for i in range(n_north_sho):
+        north_shos.append(
+            north_base_sho.copy("N" + str(i + 1), rotate=i*7))
+
+    n_north_spr = 9
+    north_base_spr = Doctor("NORTH_BASE_SPR", [
+        # Mon ... Sun
+
+        # block with no lates:
+        n_spr_night, n_spr_night, n_spr_night, n_spr_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, n_spr_night, n_spr_night, n_spr_night,
+        off, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+
+        # block with lates:
+        n_spr_night, n_spr_night, n_spr_night, n_spr_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, spr_late, spr_late, spr_late,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, n_spr_night, n_spr_night, n_spr_night,
+        off, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, spr_late, spr_late, nwd, nwd, nwd,
+        spr_late, spr_late, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=6)
+    north_base_spr.pad(n_north_spr * 7, [nwd])
+    north_base_spr.rotate(-2)  # from a Monday start to a Wednesday start
+    north_sprs = []
+    for i in range(n_north_spr):
+        north_sprs.append(north_base_spr.copy("NR" + str(i + 1), rotate=i*7))
+
+    n_south_spr = 9
+    south_base_spr = Doctor("SOUTH_BASE_SPR", [
+        # Mon ... Sun
+        # block with lates:
+        s_spr_night, s_spr_night, s_spr_night, s_spr_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, spr_late, spr_late, spr_late,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, s_spr_night, s_spr_night, s_spr_night,
+        off, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, spr_late, spr_late, nwd, nwd, nwd,
+        spr_late, spr_late, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+
+        # block with no lates:
+        s_spr_night, s_spr_night, s_spr_night, s_spr_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, s_spr_night, s_spr_night, s_spr_night,
+        off, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=6)
+    south_base_spr.pad(n_south_spr * 7, [nwd])
+    south_base_spr.rotate(-2)  # from a Monday start to a Wednesday start
+    south_sprs = []
+    for i in range(n_south_spr):
+        south_sprs.append(south_base_spr.copy("SR" + str(i + 1), rotate=i*7))
+
+    doctors = north_shos + north_sprs + south_sprs + south_shos
+
+    return Rota(
+        "CPFT draft 3, combined North/South SpRs in evenings, split "
+        "North/South at night", shifts, doctors,
+        start_date=datetime.date(2015, 8, 5),  # Wednesday
+        nwd_shifts=[nwd],
+        comments=[
+            "<b>Synopsis:</b> North and South SpRs are split at night (two 1:9"
+            " rotas), but there is a combined (1:18) evening SpR rota."
+            " A single SpR covers both halves of the county in the evening.",
+            "<b>Author:</b> Rudolf Cardinal, Aug 2015.",
+            "<b>Banding:</b> estimated at 1B (40%) for South SHOs and all "
+            "SpRs, and 1A (50%) for North SHOs.",
+            "The starting point is draft 2 <b>(q.v.)</b>.",
+            "1:9 North SpRs and 1:9 South SpRs for both evenings and nights "
+            "fails (Band 2)",
+            "If a North and a South SpR are required at night, but only one "
+            "SpR is required in the evening (when 4 SHOs are on across the "
+            "county, this pattern works at Band 1.",
+            "<b>Three SpRs who are South by day will be North at night, "
+            "and considered North in this pattern.</b>",
+            "Section 136 North/South inequality persists, but is not "
+            "complete, since North SpRs regularly cover Cambridge s136 work "
+            "for the evening shifts.",
+            "Remains Band 1B with 8+8 SpRs; not with 7+7.",
+        ],
+    )
+
+
+def cpft_draft_4_split():
+    # Shifts
+    nwd = Shift(
+        "Normal_working_day", "nwd", datetime.time(9), 8, nwd_only=True,
+        resident=True, rgb=COLOURS.NWD)
+    s_sho_late1 = Shift(
+        "S_SHO_Late_1_F", "F", datetime.time(9), 12.5,
+        roles=["Fulbourn SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_F)
+    s_sho_late2 = Shift(
+        "S_SHO_Late_2_A", "A", datetime.time(9), 12.5,
+        roles=["Addenbrooke’s SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_A)
+    s_sho_night = Shift(
+        "S_SHO_Night", "N", datetime.time(21), 12.25,
+        roles=["Fulbourn SHO", "Addenbrooke’s SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.NIGHT_FA)
+    s_spr_late = Shift(
+        "S_SpR_Late", "SL", datetime.time(9), 12.5,
+        roles=["South SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.S_SPR_LATE)
+
+    n_sho_late1 = Shift(
+        "N_SHO_Late_1_CC", "C", datetime.time(9), 12.5,
+        roles=["Cavell Centre SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_C)
+    n_sho_late2 = Shift(
+        "N_SHO_Late_2_PCH", "P", datetime.time(9), 12.5,
+        roles=["PCH SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_P)
+    n_sho_night = Shift(
+        "N_SHO_Night", "N", datetime.time(21), 12.25,
+        roles=["Cavell Centre SHO", "PCH SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.NIGHT_CP)
+    n_spr_late = Shift(
+        "N_SpR_Late", "NL", datetime.time(9), 12.5,
+        roles=["North SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.N_SPR_LATE)
+
+    spr_night = Shift(
+        "SpR_Night", "N", datetime.time(21), 12.25,
+        roles=["North SpR", "South SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.SPR_NIGHT)
+
+
+    off = Shift(
+        "Off", "OFF", datetime.time(9, 15), 7.75, work=False)
+    shifts = [nwd,
+              s_sho_late1, s_sho_late2, s_sho_night, s_spr_late,
+              n_sho_late1, n_sho_late2, n_sho_night, n_spr_late,
+              spr_night,
+              off]
+
+    # Doctors
+    n_south_sho = 14
+    south_base_sho = Doctor("SOUTH_BASE_SHO", [
+        s_sho_night, s_sho_night, s_sho_night, s_sho_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        s_sho_late1, s_sho_late1, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, s_sho_late1, s_sho_late1, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, s_sho_late1, s_sho_late1, s_sho_late1,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        s_sho_late2, s_sho_late2, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, s_sho_late2, s_sho_late2, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, s_sho_late2, s_sho_late2, s_sho_late2,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, s_sho_night, s_sho_night, s_sho_night,
+        off, off, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=5)
+    south_base_sho.pad(n_south_sho * 7, [nwd])
+    south_base_sho.rotate(-2)  # from a Monday start to a Wednesday start
+    south_shos = []
+    for i in range(n_south_sho):
+        south_shos.append(
+            south_base_sho.copy("S" + str(i + 1), rotate=i*7))
+
+    # Doctors
+    n_north_sho = 12
+    north_base_sho = Doctor("NORTH_BASE_SHO", [
+        # The same pattern as the South fails (i.e. yields 2B) because there
+        # are slightly fewer doctors.
+        n_sho_night, n_sho_night, n_sho_night, n_sho_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        n_sho_late1, n_sho_late1, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, n_sho_late1, n_sho_late1, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, n_sho_late1, n_sho_late1, n_sho_late1,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        n_sho_late2, n_sho_late2, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, n_sho_late2, n_sho_late2, off, nwd, nwd,  # INSERT OFF
+        nwd, nwd, nwd, off, n_sho_late2, n_sho_late2, n_sho_late2,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, n_sho_night, n_sho_night, n_sho_night,
+        off, off, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=5)
+    north_base_sho.pad(n_north_sho * 7, [nwd])
+    north_base_sho.rotate(-2)  # from a Monday start to a Wednesday start
+    north_shos = []
+    for i in range(n_north_sho):
+        north_shos.append(
+            north_base_sho.copy("N" + str(i + 1), rotate=i*7))
+
+    n_north_spr = 9
+    north_base_spr = Doctor("NORTH_BASE_SPR", [
+        # Mon ... Sun
+
+        # block with no nights:
+        nwd, nwd, n_spr_late, n_spr_late, nwd, nwd, nwd,
+        n_spr_late, n_spr_late, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, n_spr_late, n_spr_late, n_spr_late,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+
+        # block with nights:
+        nwd, nwd, n_spr_late, n_spr_late, nwd, nwd, nwd,
+        n_spr_late, n_spr_late, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        spr_night, spr_night, spr_night, spr_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, n_spr_late, n_spr_late, n_spr_late,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, spr_night, spr_night, spr_night,
+        off, nwd, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=6)
+    north_base_spr.pad(n_north_spr * 7, [nwd])
+    north_base_spr.rotate(-2)  # from a Monday start to a Wednesday start
+    north_sprs = []
+    for i in range(n_north_spr):
+        north_sprs.append(north_base_spr.copy("NR" + str(i + 1), rotate=i*7))
+
+    n_south_spr = 9
+    south_base_spr = Doctor("SOUTH_BASE_SPR", [
+        # Mon ... Sun
+        # block with nights:
+        nwd, nwd, s_spr_late, s_spr_late, nwd, nwd, nwd,
+        s_spr_late, s_spr_late, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        spr_night, spr_night, spr_night, spr_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, s_spr_late, s_spr_late, s_spr_late,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, spr_night, spr_night, spr_night,
+        off, nwd, nwd, nwd, nwd, nwd, nwd,
+
+        # block with no nights:
+        nwd, nwd, s_spr_late, s_spr_late, nwd, nwd, nwd,
+        s_spr_late, s_spr_late, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, s_spr_late, s_spr_late, s_spr_late,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=6)
+    south_base_spr.pad(n_south_spr * 7, [nwd])
+    south_base_spr.rotate(-2)  # from a Monday start to a Wednesday start
+    south_sprs = []
+    for i in range(n_south_spr):
+        south_sprs.append(south_base_spr.copy("SR" + str(i + 1), rotate=i*7))
+
+    doctors = north_shos + north_sprs + south_sprs + south_shos
+
+    return Rota(
+        "CPFT draft 4, split North/South SpRs in evenings, combined "
+        "North/South SpRs at night", shifts, doctors,
+        start_date=datetime.date(2015, 8, 5),  # Wednesday
+        nwd_shifts=[nwd],
+        comments=[
+            "<b>Synopsis:</b> North and South SpRs are split in the evening "
+            "(two 1:9 rotas), but combined (1:18) at night.",
+            "<b>Author:</b> Rudolf Cardinal, Aug 2015.",
+            "<b>Banding:</b> estimated at 1B (40%) for South SHOs and all "
+            "SpRs, and 1A (50%) for North SHOs.",
+            "<b>See also drafts 2/3.</b>",
+            "<b>Three SpRs who are South by day will be North at night, "
+            "and considered North in this pattern.</b>",
+        ],
+    )
+
+
 # =============================================================================
 # Rota map
 # =============================================================================
@@ -2797,6 +3191,8 @@ ROTA_GENERATORS = OrderedDict([
     ('cpft_actual_aug2015_north', cpft_actual_aug2015_north),
     ('cpft_draft_1_south', cpft_draft_1_south),
     ('cpft_draft_2_combined', cpft_draft_2_combined),
+    ('cpft_draft_3_split', cpft_draft_3_split),
+    ('cpft_draft_4_split', cpft_draft_4_split),
 ])
 
 
