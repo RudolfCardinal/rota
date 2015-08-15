@@ -49,7 +49,7 @@ Version history (see VERSION below)
       ignoring bank holidays properly for prospective cover calculations.
     - CPFT North SHO components of drafts 2/3/4 changed to avoid Band 2 as a
       result (one extra day off).
-    - SpR components of CPFT drafts 3/4 changed similarly. ***
+    - SpR components of CPFT drafts 3/4 changed similarly.
 """
 
 # =============================================================================
