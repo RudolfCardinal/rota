@@ -50,6 +50,8 @@ Version history (see VERSION below)
     - CPFT North SHO components of drafts 2/3/4 changed to avoid Band 2 as a
       result (one extra day off).
     - SpR components of CPFT drafts 3/4 changed similarly.
+    - Default specification of rotas is now by weekday-based pattern, not by
+      absolute date.
 """
 
 # =============================================================================
@@ -1140,6 +1142,25 @@ class Doctor(object):
             )
         )
 
+    def make_group(self, prefix, rotation_days=7, n=None):
+        """Returns a list of n Doctor objects, each cloned from this one, each
+        numbered (from 1) with a prefix, and each successively rotated by
+        rotation_days. If n is None, the length of the daypattern is used for
+        n (suitable for wholly cyclical rotas, but not necessarily more
+        complicated patterns where shifts are shared across groups of
+        doctors."""
+        doctors = []
+        if n is None:
+            l = len(self.daypattern)
+            if l % rotation_days != 0:
+                raise ValueError(
+                    "daypattern length ({}) is not a multiple of "
+                    "rotation_days ({})".format(l, rotation_days))
+            n = l // rotation_days
+        for i in range(n):
+            doctors.append(self.copy(prefix + str(i + 1), rotate=i * 7))
+        return doctors
+
     def pad(self, target_length, shifts):
         """Pads the pattern of shifts to the target length (in days), using
         the sequence of shifts specified."""
@@ -1686,9 +1707,11 @@ class Rota(object):
                  start_date=datetime.date(2015, 8, 5),
                  end_date=datetime.date(2016, 2, 2),
                  prospective_cover=True,
-                 prototype_rotation_to_monday_start=2,
+                 prototype_rotation_to_monday_start=0,
                  work4h_after7pm_halformore=True,
                  hours_per_leave_week=40,
+                 doctor_patterns_weekday_based=True,
+                 doctor_patterns_start_weekday=0,  # Monday
                  comments=None):
         """
         Initializes the rota.
@@ -1699,7 +1722,8 @@ class Rota(object):
         nwd_shifts: list of Shift objects; all normal-working-day shifts
         prototypes: list of Doctor objects with prototype day patterns
         start_date: date the rota starts
-        end_date: last date of the rota
+        end_date: last date of the rota (or None to generate a rota having the
+            length of the longest daypattern of any of the doctors)
         prospective_cover: is prospective cover in use?
         prototype_rotation_to_monday_start: rotate() parameter required to get
             the prototype daypattern to start on a Monday (default 2, for
@@ -1708,6 +1732,10 @@ class Rota(object):
             4 hours after 7pm on half or more occasions?
         hours_per_leave_week: usually 40; the number of hours in a 'base' week,
             used for leave calculations
+        doctor_patterns_weekday_based: if True, the patterns in the doctor
+            objects are taken to start on a specific weekday (see
+            doctor_patterns_start_weekday); if False, they are assumed to start
+            on the start date of the rota.
         comments: a list of HTML objects to be inserted in a <ul> of comments,
             or None.
         """
@@ -1723,20 +1751,45 @@ class Rota(object):
             prototype_rotation_to_monday_start
         self.work4h_after7pm_halformore = work4h_after7pm_halformore
         self.hours_per_leave_week = hours_per_leave_week
+        self.doctor_patterns_weekday_based = doctor_patterns_weekday_based
+        self.doctor_patterns_start_weekday = doctor_patterns_start_weekday % 7
         self.comments = [] if comments is None else comments
+        # Special case if end_date is None:
+        if end_date is None:
+            maxlen = max([d.get_pattern_length() for d in self.doctors])
+            self.end_date = self.start_date + datetime.timedelta(
+                days=maxlen - 1)
         # Derived:
         self.start_time = datetime.datetime.combine(
-            start_date, datetime.time())  # midnight on first day
-        self.n_days = (end_date - start_date).days + 1
+            self.start_date, datetime.time())  # midnight on first day
+        self.n_days = (self.end_date - self.start_date).days + 1
+        # Rotate the patterns? If so, make copies.
+        if doctor_patterns_weekday_based:
+            logger.debug("1")
+            logger.debug(doctor_patterns_start_weekday)
+            logger.debug(start_date)
+            logger.debug(start_date.weekday())
+            if doctor_patterns_start_weekday != start_date.weekday():
+                logger.debug("2")
+                rotation = doctor_patterns_start_weekday - start_date.weekday()
+                logger.debug("rotating all patterns by {}".format(rotation))
+                self.doctors = [
+                    d.copy(rotate=rotation)
+                    for d in doctors
+                ]
 
     def __repr__(self):
         return (
             "Rota(name={}, shifts={}, doctors={}, nwd_shifts={}, "
             "start_date={}, end_date={}, prospective_cover={}, "
-            "work4h_after7pm_halformore={}, hours_per_leave_week={})".format(
+            "work4h_after7pm_halformore={}, hours_per_leave_week={}, "
+            "doctor_patterns_weekday_based={}, "
+            "doctor_patterns_start_weekday={})".format(
                 repr(self.name), self.shifts, self.doctors, self.nwd_shifts,
                 self.start_date, self.end_date, self.prospective_cover,
                 self.work4h_after7pm_halformore, self.hours_per_leave_week,
+                self.doctor_patterns_weekday_based,
+                self.doctor_patterns_start_weekday,
             )
         )
 
@@ -2374,7 +2427,6 @@ def test_prospective_cover():
     shifts = [nwd, long, night, off]
 
     # Doctors
-    n_docs = 8
     base_doc = Doctor("Prototype doctor", [
         long, nwd, nwd, long, nwd, nwd, nwd,
         off, off, night, night, night, night, night,
@@ -2385,9 +2437,7 @@ def test_prospective_cover():
         nwd, nwd, long, nwd, nwd, nwd, nwd,
         nwd, long, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=6.5)
-    doctors = []
-    for i in range(n_docs):
-        doctors.append(base_doc.copy("doc_" + str(i + 1), rotate=i*7))
+    doctors = base_doc.make_group("doc_")
 
     # Rota
     start_monday = ARBITRARY_MONDAY_NEAR_BH
@@ -2395,7 +2445,7 @@ def test_prospective_cover():
     return Rota(
         "Test prospective cover calculations", shifts, doctors,
         start_date=start_monday,
-        end_date=start_monday + datetime.timedelta(days=7 * n_docs - 1),
+        end_date=None,
         hours_per_leave_week=40,
         nwd_shifts=[nwd],
         prototypes=[base_doc],
@@ -2409,6 +2459,7 @@ def test_prospective_cover():
             "contains a bank holiday to check this.",
         ],
     )
+
 
 # -----------------------------------------------------------------------------
 # CPFT actual
@@ -2572,6 +2623,7 @@ def cpft_actual_aug2015_south():
     # Rota
     return Rota(
         "CPFT Aug 2015 South", shifts, doctors,
+        doctor_patterns_weekday_based=False,
         start_date=datetime.date(2015, 8, 5),  # start on a Wednesday
         nwd_shifts=[nwd],
         comments=[
@@ -2636,7 +2688,7 @@ def cpft_actual_aug2015_north():
         late2, late2, late2, late2, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=0)
-    basedoc.rotate(-2)  # start on a Wednesday instead of a Monday
+    basedoc.rotate(-2)  # move from a Monday to a Wednesday start
     doctors = [basedoc]  # so we can operate with 1-indexing for a while
     for i in range(1, 18 + 1):
         if i in [2, 3, 9, 10, 15, 17]:
@@ -2674,6 +2726,7 @@ def cpft_actual_aug2015_north():
     # Rota
     return Rota(
         "CPFT Aug 2015 North", shifts, doctors,
+        doctor_patterns_weekday_based=False,
         start_date=datetime.date(2015, 8, 5),  # start on a Wednesday
         nwd_shifts=[nwd],
         comments=[
@@ -2721,7 +2774,6 @@ def cpft_draft_1_south():
     shifts = [nwd, sho_late1, sho_late2, sho_night, spr_late, spr_night, off]
 
     # Doctors
-    n_sho = 14
     base_sho = Doctor("Prototype SHO", [
         sho_night, sho_night, sho_night, sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
@@ -2735,14 +2787,12 @@ def cpft_draft_1_south():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, off, sho_night, sho_night, sho_night,
         off, off, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=5)
-    base_sho.pad(n_sho * 7, [nwd])
-    base_sho.rotate(-2)  # from a Monday start to a Wednesday start
-    shos = []
-    for i in range(n_sho):
-        shos.append(base_sho.copy("SHO_" + str(i + 1), rotate=i*7))
+    shos = base_sho.make_group("SHO_")
+    assert(len(shos) == 14)
 
-    n_spr = 12
     # Although I like weeks of nights, the RCP strongly discourages them.
     # So this is a 4-and-3. We can follow the classic RCP (2006) Table 2,
     # then remove some 'off' shifts, as it seems we can.
@@ -2758,12 +2808,11 @@ def cpft_draft_1_south():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, spr_night, spr_night, spr_night,
         off, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=6)
-    base_spr.pad(n_spr * 7, [nwd])
-    base_spr.rotate(-2)  # from a Monday start to a Wednesday start
-    sprs = []
-    for i in range(n_spr):
-        sprs.append(base_spr.copy("SpR_" + str(i + 1), rotate=i*7))
+    sprs = base_spr.make_group("SpR_")
+    assert(len(sprs) == 12)
 
     doctors = shos + sprs
 
@@ -2831,7 +2880,6 @@ def cpft_draft_2_combined():
               off]
 
     # Doctors
-    n_south_sho = 14
     south_base_sho = Doctor("South prototype SHO", [
         s_sho_night, s_sho_night, s_sho_night, s_sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
@@ -2845,16 +2893,13 @@ def cpft_draft_2_combined():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, off, s_sho_night, s_sho_night, s_sho_night,
         off, off, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=5)
-    south_base_sho.pad(n_south_sho * 7, [nwd])
-    south_base_sho.rotate(-2)  # from a Monday start to a Wednesday start
-    south_shos = []
-    for i in range(n_south_sho):
-        south_shos.append(
-            south_base_sho.copy("S" + str(i + 1), rotate=i*7))
+    south_shos = south_base_sho.make_group("S")
+    assert(len(south_shos) == 14)
 
     # Doctors
-    n_north_sho = 12
     north_base_sho = Doctor("North prototype SHO", [
         # The same pattern as the South fails (i.e. yields 2B) because there
         # are slightly fewer doctors.
@@ -2871,15 +2916,9 @@ def cpft_draft_2_combined():
         nwd, nwd, nwd, off, n_sho_night, n_sho_night, n_sho_night,
         off, off, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=5)
-    north_base_sho.pad(n_north_sho * 7, [nwd])
-    north_base_sho.rotate(-2)  # from a Monday start to a Wednesday start
-    north_shos = []
-    for i in range(n_north_sho):
-        north_shos.append(
-            north_base_sho.copy("N" + str(i + 1), rotate=i*7))
+    north_shos = north_base_sho.make_group("N")
+    assert(len(north_shos) == 12)
 
-    n_spr = 18  # 18 normal; 12 works at 40%; 11 doesn't quite
-    #
     base_spr = Doctor("Prototype SpR", [
         # Mon ... Sun
         spr_night, spr_night, spr_night, spr_night, off, nwd, nwd,
@@ -2901,11 +2940,9 @@ def cpft_draft_2_combined():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=6)
-    base_spr.pad(n_spr * 7, [nwd])
-    base_spr.rotate(-2)  # from a Monday start to a Wednesday start
-    sprs = []
-    for i in range(n_spr):
-        sprs.append(base_spr.copy("R" + str(i + 1), rotate=i*7))
+    sprs = base_spr.make_group("R")
+    assert(len(sprs) == 18)
+    # ... 18 normal; 12 works at 40%; 11 doesn't quite
 
     doctors = north_shos + sprs + south_shos
 
@@ -3082,7 +3119,6 @@ def cpft_draft_3_split():
               off]
 
     # Doctors
-    n_south_sho = 14
     south_base_sho = Doctor("South prototype SHO", [
         s_sho_night, s_sho_night, s_sho_night, s_sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
@@ -3096,16 +3132,13 @@ def cpft_draft_3_split():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, off, s_sho_night, s_sho_night, s_sho_night,
         off, off, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=5)
-    south_base_sho.pad(n_south_sho * 7, [nwd])
-    south_base_sho.rotate(-2)  # from a Monday start to a Wednesday start
-    south_shos = []
-    for i in range(n_south_sho):
-        south_shos.append(
-            south_base_sho.copy("S" + str(i + 1), rotate=i*7))
+    south_shos = south_base_sho.make_group("S")
+    assert(len(south_shos) == 14)
 
     # Doctors
-    n_north_sho = 12
     north_base_sho = Doctor("North prototype SHO", [
         # The same pattern as the South fails (i.e. yields 2B) because there
         # are slightly fewer doctors.
@@ -3122,14 +3155,9 @@ def cpft_draft_3_split():
         nwd, nwd, nwd, off, n_sho_night, n_sho_night, n_sho_night,
         off, off, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=5)
-    north_base_sho.pad(n_north_sho * 7, [nwd])
-    north_base_sho.rotate(-2)  # from a Monday start to a Wednesday start
-    north_shos = []
-    for i in range(n_north_sho):
-        north_shos.append(
-            north_base_sho.copy("N" + str(i + 1), rotate=i*7))
+    north_shos = north_base_sho.make_group("N")
+    assert(len(north_shos) == 12)
 
-    n_north_spr = 9
     north_base_spr = Doctor("North prototype SpR", [
         # Mon ... Sun
 
@@ -3155,13 +3183,8 @@ def cpft_draft_3_split():
         spr_late, spr_late, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=6)
-    north_base_spr.pad(n_north_spr * 7, [nwd])
-    north_base_spr.rotate(-2)  # from a Monday start to a Wednesday start
-    north_sprs = []
-    for i in range(n_north_spr):
-        north_sprs.append(north_base_spr.copy("NR" + str(i + 1), rotate=i*7))
+    north_sprs = north_base_spr.make_group("NR", n=9)
 
-    n_south_spr = 9
     south_base_spr = Doctor("South prototype SpR", [
         # Mon ... Sun
         # block with lates:
@@ -3186,11 +3209,7 @@ def cpft_draft_3_split():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=6)
-    south_base_spr.pad(n_south_spr * 7, [nwd])
-    south_base_spr.rotate(-2)  # from a Monday start to a Wednesday start
-    south_sprs = []
-    for i in range(n_south_spr):
-        south_sprs.append(south_base_spr.copy("SR" + str(i + 1), rotate=i*7))
+    south_sprs = south_base_spr.make_group("SR", n=9)
 
     doctors = north_shos + north_sprs + south_sprs + south_shos
 
@@ -3268,7 +3287,6 @@ def cpft_draft_4_split():
         roles=["North SpR", "South SpR", "Section 12 approved"],
         resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.SPR_NIGHT)
 
-
     off = Shift(
         "Off", "OFF", datetime.time(9, 15), 7.75, work=False)
     shifts = [nwd,
@@ -3278,7 +3296,6 @@ def cpft_draft_4_split():
               off]
 
     # Doctors
-    n_south_sho = 14
     south_base_sho = Doctor("South prototype SHO", [
         s_sho_night, s_sho_night, s_sho_night, s_sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
@@ -3292,16 +3309,13 @@ def cpft_draft_4_split():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, off, s_sho_night, s_sho_night, s_sho_night,
         off, off, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=5)
-    south_base_sho.pad(n_south_sho * 7, [nwd])
-    south_base_sho.rotate(-2)  # from a Monday start to a Wednesday start
-    south_shos = []
-    for i in range(n_south_sho):
-        south_shos.append(
-            south_base_sho.copy("S" + str(i + 1), rotate=i*7))
+    south_shos = south_base_sho.make_group("S")
+    assert(len(south_shos) == 14)
 
     # Doctors
-    n_north_sho = 12
     north_base_sho = Doctor("North prototype SHO", [
         # The same pattern as the South fails (i.e. yields 2B) because there
         # are slightly fewer doctors.
@@ -3318,14 +3332,9 @@ def cpft_draft_4_split():
         nwd, nwd, nwd, off, n_sho_night, n_sho_night, n_sho_night,
         off, off, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=5)
-    north_base_sho.pad(n_north_sho * 7, [nwd])
-    north_base_sho.rotate(-2)  # from a Monday start to a Wednesday start
-    north_shos = []
-    for i in range(n_north_sho):
-        north_shos.append(
-            north_base_sho.copy("N" + str(i + 1), rotate=i*7))
+    north_shos = north_base_sho.make_group("N")
+    assert(len(north_shos) == 12)
 
-    n_north_spr = 9
     north_base_spr = Doctor("North prototype SpR", [
         # Mon ... Sun
 
@@ -3351,13 +3360,8 @@ def cpft_draft_4_split():
         nwd, nwd, nwd, nwd, spr_night, spr_night, spr_night,
         off, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=6)
-    north_base_spr.pad(n_north_spr * 7, [nwd])
-    north_base_spr.rotate(-2)  # from a Monday start to a Wednesday start
-    north_sprs = []
-    for i in range(n_north_spr):
-        north_sprs.append(north_base_spr.copy("NR" + str(i + 1), rotate=i*7))
+    north_sprs = north_base_spr.make_group("NR", n=9)
 
-    n_south_spr = 9
     south_base_spr = Doctor("South prototype SpR", [
         # Mon ... Sun
         # block with nights:
@@ -3382,11 +3386,7 @@ def cpft_draft_4_split():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=6)
-    south_base_spr.pad(n_south_spr * 7, [nwd])
-    south_base_spr.rotate(-2)  # from a Monday start to a Wednesday start
-    south_sprs = []
-    for i in range(n_south_spr):
-        south_sprs.append(south_base_spr.copy("SR" + str(i + 1), rotate=i*7))
+    south_sprs = south_base_spr.make_group("SR", n=9)
 
     doctors = north_shos + north_sprs + south_sprs + south_shos
 
