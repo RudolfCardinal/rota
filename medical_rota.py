@@ -41,13 +41,22 @@ Version history (see VERSION below)
     - CPFT Draft 2 rota spread out to be more realistic.
     - CPFT Draft 3 added.
 
+    1.2 (2015-08-14)
+    - Prototype display added.
+    - Parallel processing for banding calculations, role coverage.
+    - CPFT Draft 4 added.
+    - Bugfix to get_work_interval(ignore_bank_holidays=True) -- wasn't
+      ignoring bank holidays properly for prospective cover calculations.
+    - CPFT North SHO components of drafts 2/3/4 changed to avoid Band 2 as a
+      result (one extra day off).
+    - SpR components of CPFT drafts 3/4 changed similarly. ***
 """
 
 # =============================================================================
 # Version
 # =============================================================================
 
-VERSION = 1.1
+VERSION = 1.2
 
 # =============================================================================
 # Imports
@@ -63,6 +72,7 @@ logger.setLevel(logging.DEBUG)
 import argparse
 import cgi
 from collections import OrderedDict
+import concurrent.futures
 import datetime
 import string
 import sys
@@ -148,7 +158,9 @@ SECONDS_PER_HOUR = SECONDS_PER_MINUTE * MINUTES_PER_HOUR
 SECONDS_PER_DAY = SECONDS_PER_HOUR * HOURS_PER_DAY
 SECONDS_PER_WEEK = SECONDS_PER_DAY * DAYS_PER_WEEK
 
-ARBITRARY_DATE = datetime.datetime(2015, 1, 1)
+ARBITRARY_DATE = datetime.date(2015, 1, 1)
+ARBITRARY_MONDAY_NEAR_BH = datetime.date(2015, 8, 17)
+ARBITRARY_MONDAY_FAR_FROM_BH = datetime.date(2015, 6, 1)
 
 DP = 2
 
@@ -969,13 +981,19 @@ class Shift(object):
             BLUE=self.rgb[2],
         )
 
-    def get_day_td(self, date):
+    def get_day_td(self, date=None, daynum=None):
         """Gets a table cell (HTML td element) for this shift on a given date,
-        used for the main rota depiction."""
-        bank_holiday = is_bank_holiday(date)
-        weekend = is_weekend(date)
+        used for the main rota depiction and the prototype."""
+        if date is None and daynum is None:
+            raise AssertionError("Specify either date or daynum")
+        if date:
+            bank_holiday = is_bank_holiday(date)
+            weekend = is_weekend(date)
+        else:
+            bank_holiday = False
+            weekend = daynum in [5, 6]
         if (bank_holiday or weekend) and self.nwd_only:
-            classdetail = ""
+            classdetail = ' class="weekend"'
             content = "(off)"
         else:
             classdetail = ' class="{}"'.format(self.name)
@@ -1069,11 +1087,11 @@ class Shift(object):
         on a weekend/Bank Holiday). Returns None if it's invalid."""
         if not self.work:
             return None
-        if self.nwd_only:
-            if ignore_bank_holidays and is_weekend(date):
-                return None
-            elif not is_normal_working_day(date):
-                return None
+        if self.nwd_only and is_weekend(date):
+            return None
+        if (self.nwd_only and is_bank_holiday(date)
+                and not ignore_bank_holidays):
+            return None
         return self.get_interval(date)
 
     def roles_include(self, role):
@@ -1117,7 +1135,7 @@ class Doctor(object):
             "ooh_roles={})".format(
                 repr(self.name),
                 repr(self.daypattern),
-                leave_weeks_per_year,
+                self.leave_weeks_per_year,
                 self.ooh_roles if self.ooh_roles else None,
             )
         )
@@ -1280,6 +1298,7 @@ class Doctor(object):
         )
         This is the SLOWEST part.
         """
+        logger.debug("  ... banding calcs part 1 for {}".format(self.name))
         rota_interval = Interval.dayspan(rota.start_date, rota.end_date,
                                          include_end=True)
         rota_weeks = convert_duration(rota_interval.duration(), 'w')
@@ -1638,6 +1657,24 @@ class Doctor(object):
 
 
 # =============================================================================
+# Standalone functions for parallel processing. NOT YET WORKING.
+# =============================================================================
+
+def pfunc_doctor_banding(args):
+    # logger.debug("args={}".format(args))
+    rota = args[0]
+    doc = args[1]
+    # logger.debug("rota={}, doc={}".format(rota, doc))
+    return doc.banding_info(rota)
+
+
+def pfunc_role_coverage(args):
+    rota = args[0]
+    role = args[1]
+    return rota.get_role_coverage(role)
+
+
+# =============================================================================
 # Rota definition
 # =============================================================================
 
@@ -1645,9 +1682,11 @@ class Rota(object):
     """Object representing a rota."""
 
     def __init__(self, name, shifts, doctors, nwd_shifts,
+                 prototypes=None,
                  start_date=datetime.date(2015, 8, 5),
                  end_date=datetime.date(2016, 2, 2),
                  prospective_cover=True,
+                 prototype_rotation_to_monday_start=2,
                  work4h_after7pm_halformore=True,
                  hours_per_leave_week=40,
                  comments=None):
@@ -1658,9 +1697,13 @@ class Rota(object):
         shifts: list of Shift objects; all shifts used by the rota
         doctors: list of Doctor objects
         nwd_shifts: list of Shift objects; all normal-working-day shifts
+        prototypes: list of Doctor objects with prototype day patterns
         start_date: date the rota starts
         end_date: last date of the rota
         prospective_cover: is prospective cover in use?
+        prototype_rotation_to_monday_start: rotate() parameter required to get
+            the prototype daypattern to start on a Monday (default 2, for
+            patterns that start on a Wednesday).
         work4h_after7pm_halformore: does monitoring show that the doctors work
             4 hours after 7pm on half or more occasions?
         hours_per_leave_week: usually 40; the number of hours in a 'base' week,
@@ -1671,10 +1714,13 @@ class Rota(object):
         self.name = name
         self.shifts = shifts
         self.doctors = doctors
+        self.prototypes = [] if prototypes is None else prototypes
         self.nwd_shifts = nwd_shifts
         self.start_date = start_date
         self.end_date = end_date
         self.prospective_cover = prospective_cover
+        self.prototype_rotation_to_monday_start = \
+            prototype_rotation_to_monday_start
         self.work4h_after7pm_halformore = work4h_after7pm_halformore
         self.hours_per_leave_week = hours_per_leave_week
         self.comments = [] if comments is None else comments
@@ -1715,6 +1761,7 @@ class Rota(object):
             time is sensible, and will make this non-zero unless you build
             a separate handover shift, which is visually complex).
         """
+        logger.debug("... role coverage for: {}".format(role))
         # 1. Build a list of intervals covering that role.
         coverage = IntervalList(no_overlap=False, no_contiguous=False)
         # ... an IntervalList that's happy to maintain overlapping intervals
@@ -1753,7 +1800,8 @@ class Rota(object):
         times.sort()
         return times
 
-    def print_html(self, filename, daynums=False, skipanalytics=False):
+    def print_html(self, filename, daynums=False, skipanalytics=False,
+                   noprototypes=False):
         """Write the rota summary/analysis to an HTML file."""
         logger.info("Writing HTML for rota {} to {}...".format(self.name,
                                                                filename))
@@ -1775,7 +1823,8 @@ class Rota(object):
                     </html>
                 """.format(title=webify(self.name),
                            css=self.get_css(),
-                           body=self.get_html_body(daynums, skipanalytics)),
+                           body=self.get_html_body(daynums, skipanalytics,
+                                                   noprototypes)),
                 file=f
             )
         logger.info("HTML written.")
@@ -1783,8 +1832,20 @@ class Rota(object):
     def get_css(self):
         """Returns the CSS for the rota display."""
         css = """
-            .weekend {
-                background-color: rgb(200, 200, 200);
+            body {
+                font-family: "Times New Roman", Georgia, Serif;
+            }
+            h1, h2, h3 {
+                font-family: Arial, Helvetica, sans-serif;
+            }
+            h1 {
+                font-size: 1.4em;
+            }
+            h2 {
+                font-size: 1.2em;
+            }
+            h3 {
+                font-size: 1.0em;
             }
             table {
                 border-collapse: collapse;
@@ -1798,12 +1859,19 @@ class Rota(object):
                 padding: 1px;
                 border: 1px solid black;
             }
+            .endmatter {
+                background-color: rgb(225, 225, 225);
+            }
+            .weekend {
+                background-color: rgb(200, 200, 200);
+            }
         """
         for s in self.shifts:
             css += s.get_css_definition()
         return css
 
-    def get_html_body(self, daynums=False, skipanalytics=False):
+    def get_html_body(self, daynums=False, skipanalytics=False,
+                      noprototypes=False):
         """Returns the main part of the HTML display."""
         html = (
             "<h1>{}</h1>".format(self.name)
@@ -1812,6 +1880,8 @@ class Rota(object):
             + self.get_html_shifts()
             + self.get_html_rota_pattern(daynums)
         )
+        if not noprototypes:
+            html += self.get_html_prototypes()
         if not skipanalytics:
             html += (
                 self.get_html_role_coverage()
@@ -1838,7 +1908,9 @@ class Rota(object):
     def get_html_footnotes(self):
         """HTML for footnotes."""
         return """
-            <h2>Footnotes</h2>
+            <div class="endmatter">
+            <h2>End matter</h2>
+            <h3>Footnotes</h3>
             <ul>
                 <li>Normal working day coverage: the closer this is to 100%,
                 (a) the better wards and clinics run, and (b) the less
@@ -1891,7 +1963,7 @@ class Rota(object):
                 48h/week limit). They should no longer be in use [OHFP].</li>
             </ul>
 
-            <h2>References</h2>
+            <h3>References</h3>
             <ul>
                 <li>[BMA_1] BMA: <a href="{bma_1}">Are you being paid
                 correctly? BMA pay guidance for junior doctors</a></li>
@@ -1913,6 +1985,15 @@ class Rota(object):
                 at work → Pays, fees &amp; allowances → Pay scales
                 → <a href="{bma_6}">Junior doctors England</a></li>
 
+                <li>[BMA_7] <a href="{bma}">BMA</a> → Home → Practical support
+                at work → Contracts → Junior contracts → Rotas and working
+                patterns → <a href="{bma_7}">Riddell formula
+                calculator</a></li>
+
+                <li>[NHS_1] <a href="nhs_1">NHS Employers (2002–2013)
+                Terms and Conditions of Service: NHS Medical and Dental Staff
+                (England)</a></li>
+
                 <li>[RCP_1] RCP London (2006) <a href="{rcp_1}">Designing safer
                 rotas for junior doctors</a></li>
 
@@ -1920,12 +2001,12 @@ class Rota(object):
                 fourth edition. Oxford University Press.</li>
             </ul>
 
-            <h2>Abbreviations</h2>
+            <h3>Abbreviations</h3>
             <ul>
                 <li>BMA = British Medical Association</li>
+                <li>EWTD = European Working Time Directive</li>
                 <li>LTFT = less than full time</li>
                 <li>ND = New Deal</li>
-                <li>EWTD = European Working Time Directive</li>
                 <li>WTR = Working Time Regulations</li>
             </ul>
 
@@ -1933,6 +2014,8 @@ class Rota(object):
             {VERSION}. No guarantees as to accuracy; check with your Medical
             Staffing department as well. Software is open-source and available
             at <a href="{url}">{url}</a>.</p>
+
+            </div>
         """.format(
             url="https://github.com/RudolfCardinal/rota",
             VERSION=VERSION,
@@ -1943,7 +2026,9 @@ class Rota(object):
             bma_4="http://bma.org.uk/practical-support-at-work/ewtd/ewtd-juniors/ewtd-opt-out",  # noqa
             bma_5="https://bma.org.uk/-/media/files/pdfs/practical%20advice%20at%20work/your%20rights/pay%20fees%20allowances/finalcountdown_ewtd.pdf",  # noqa
             bma_6="http://bma.org.uk/practical-support-at-work/pay-fees-allowances/pay-scales/juniors-england",  # noqa
-            rcp_1="https://www.rcplondon.ac.uk/sites/default/files/documents/designing_safer_rotasweb.pdf"  # noqa
+            bma_7="http://bma.org.uk/practical-support-at-work/contracts/juniors-contracts/rotas-and-working-patterns/rota-template-and-riddell-calculator",  # noqa
+            rcp_1="https://www.rcplondon.ac.uk/sites/default/files/documents/designing_safer_rotasweb.pdf",  # noqa
+            nhs_1="http://www.nhsemployers.org/~/media/Employers/Documents/Pay%20and%20reward/Terms_and_Conditions_of_Service_NHS_Medical_and_Dental_Staff_300813_bt.pdf",  # noqa
         )
 
     def get_html_rota_settings(self):
@@ -1988,7 +2073,15 @@ class Rota(object):
     def get_html_rota_pattern(self, daynums=False):
         """HTML for main rota pattern."""
         logger.info("- rota")
-        html = "<h2>Rota</h2><table>"
+        wholespan = Interval.dayspan(self.start_date, self.end_date)
+        n_weeks = wholespan.duration_in('w')
+        html = """
+            <h2>Rota</h2>
+            <p>Weeks in rota: {n_weeks}</p>
+            <table>
+        """.format(
+            n_weeks=n_weeks,
+        )
         # Header row
         dateheader = "Date"
         if daynums:
@@ -2010,9 +2103,46 @@ class Rota(object):
             html += "<tr{}>".format(' class="weekend"' if wk or bh else "")
             html += "<td>{}</td>".format(datetext)
             for doctor in self.doctors:
-                html += doctor.get_shift_for_day(dayoffset).get_day_td(date)
+                html += (
+                    doctor.get_shift_for_day(dayoffset).get_day_td(date=date)
+                )
             html += "</tr>\n"
         html += "</table>"
+        return html
+
+    def get_html_prototypes(self):
+        """HTML for doctor prototypes."""
+        if not self.prototypes:
+            return ""
+        html = "<h2>Doctor prototypes</h2>"
+        for p in self.prototypes:
+            d = p.copy(rotate=self.prototype_rotation_to_monday_start)
+            html += """
+                <h3>{name}</h3>
+                <table>
+                    <tr>
+                        <th>Week</th>
+                        <th>Mon</th>
+                        <th>Tue</th>
+                        <th>Wed</th>
+                        <th>Thu</th>
+                        <th>Fri</th>
+                        <th class="weekend">Sat</th>
+                        <th class="weekend">Sun</th>
+                    </tr>
+            """.format(
+                name=d.name
+            )
+            for i in range(len(d.daypattern)):
+                daynum = i % 7  # start on a Monday
+                weeknum = i // 7 + 1  # // is integer division
+                shift = d.daypattern[i]
+                if daynum == 0:
+                    html += "<tr><td>{}</td>".format(weeknum)
+                html += shift.get_day_td(daynum=daynum)
+                if daynum == 7:
+                    html += "</tr>\n"
+            html += "</table>\n"
         return html
 
     def get_html_role_coverage(self):
@@ -2028,9 +2158,26 @@ class Rota(object):
                         ~2–4%)</th>
                 </tr>
         """
-        for role in self.get_all_roles():
-            logger.debug("... role: {}".format(role))
-            (at_least, more_than_one) = self.get_role_coverage(role)
+        roles = self.get_all_roles()
+
+        resultlist = []
+        args = ((self, role) for role in roles)
+
+        # Non-parallel version for debugging:
+        # for result in map(pfunc_role_coverage, args):
+        #     resultlist.append(result)
+
+        # Parallel version (fewer error details if it fails):
+        # http://stackoverflow.com/questions/6785226
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for result in executor.map(pfunc_role_coverage, args):
+                resultlist.append(result)
+
+        for i in range(len(roles)):
+            role = roles[i]
+            result = resultlist[i]
+
+            (at_least, more_than_one) = result
             html += """
                 <tr>
                     <td>{role}</td>
@@ -2097,9 +2244,26 @@ class Rota(object):
                     <th>Working</th>
                 </tr>
         """
-        for d in self.doctors:
-            logger.debug("  ... banding calcs for {}".format(d.name))
-            banding_info = d.banding_info(self)
+
+        banding_info_list = []
+        args = ((self, doc) for doc in self.doctors)
+
+        # Non-parallel version for debugging:
+        # for result in map(pfunc_doctor_banding, args):
+        #     banding_info_list.append(result)
+
+        # Parallel version (fewer error details if it fails):
+        # http://stackoverflow.com/questions/6785226
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for result in executor.map(pfunc_doctor_banding, args):
+                banding_info_list.append(result)
+
+        for i in range(len(self.doctors)):
+            d = self.doctors[i]
+            logger.debug("  ... banding calcs part 2 for {}".format(d.name))
+            # banding_info = d.banding_info(self)
+            banding_info = banding_info_list[i]
+
             (
                 hours_per_week,
                 hours_per_week_inc_pc,
@@ -2185,11 +2349,69 @@ def test():
 
 
 # =============================================================================
-# Specific rota
+# Specific rotas
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Actual
+# Examples/tests
+# -----------------------------------------------------------------------------
+
+def test_prospective_cover():
+    # Shifts
+    nwd = Shift(  # 4h am, 4h pm
+        "Normal_working_day", "nwd", datetime.time(9), 8, nwd_only=True,
+        resident=True, rgb=COLOURS.NWD)
+    long = Shift(  # 6h am, 7h pm
+        "Long", "L", datetime.time(6), 13,
+        roles=["On call"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_F)
+    night = Shift(  # 6h am, 6h pm
+        "Pseudonight", "N", datetime.time(6), 12,
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.NIGHT_FA)
+    off = Shift(
+        "Off", "OFF", datetime.time(9, 15), 7.75, work=False,
+        rgb=COLOURS.OFF)
+    shifts = [nwd, long, night, off]
+
+    # Doctors
+    n_docs = 8
+    base_doc = Doctor("Prototype doctor", [
+        long, nwd, nwd, long, nwd, nwd, nwd,
+        off, off, night, night, night, night, night,
+        night, night, off, off, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, long, long, long,
+        nwd, nwd, long, nwd, nwd, nwd, nwd,
+        nwd, long, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=6.5)
+    doctors = []
+    for i in range(n_docs):
+        doctors.append(base_doc.copy("doc_" + str(i + 1), rotate=i*7))
+
+    # Rota
+    start_monday = ARBITRARY_MONDAY_NEAR_BH
+    # start_monday = ARBITRARY_MONDAY_FAR_FROM_BH
+    return Rota(
+        "Test prospective cover calculations", shifts, doctors,
+        start_date=start_monday,
+        end_date=start_monday + datetime.timedelta(days=7 * n_docs - 1),
+        hours_per_leave_week=40,
+        nwd_shifts=[nwd],
+        prototypes=[base_doc],
+        comments=[
+            "Tests prospective cover calculations.",
+            "By Riddell formula, should be 47.86 h/week inc. PC.",
+            "Rota hours mimic the example in [BMA_7] (which shows 47.9 h/week "
+            "or 47.86 with rounding removed).",
+            "<b>Should give identical hours/week for all doctors, even when "
+            "some are working on bank holidays.</b> The test interval "
+            "contains a bank holiday to check this.",
+        ],
+    )
+
+# -----------------------------------------------------------------------------
+# CPFT actual
 # -----------------------------------------------------------------------------
 
 def cpft_actual_aug2015_south():
@@ -2465,7 +2687,7 @@ def cpft_actual_aug2015_north():
 
 
 # -----------------------------------------------------------------------------
-# Draft
+# CPFT draft
 # -----------------------------------------------------------------------------
 
 def cpft_draft_1_south():
@@ -2500,7 +2722,7 @@ def cpft_draft_1_south():
 
     # Doctors
     n_sho = 14
-    base_sho = Doctor("BASE_SHO", [
+    base_sho = Doctor("Prototype SHO", [
         sho_night, sho_night, sho_night, sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         sho_late1, sho_late1, nwd, nwd, nwd, nwd, nwd,
@@ -2524,7 +2746,7 @@ def cpft_draft_1_south():
     # Although I like weeks of nights, the RCP strongly discourages them.
     # So this is a 4-and-3. We can follow the classic RCP (2006) Table 2,
     # then remove some 'off' shifts, as it seems we can.
-    base_spr = Doctor("BASE_SPR", [
+    base_spr = Doctor("Prototype SpR", [
         # Mon ... Sun
         spr_night, spr_night, spr_night, spr_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
@@ -2550,6 +2772,7 @@ def cpft_draft_1_south():
         "CPFT draft 1, South", shifts, doctors,
         start_date=datetime.date(2015, 8, 5),  # Wednesday
         nwd_shifts=[nwd],
+        prototypes=[base_sho, base_spr],
         comments=[
             "<b>Synopsis:</b> an improvement to the South rota by splitting "
             "SHOs and SpRs; however, it doesn’t help the North problem. "
@@ -2609,7 +2832,7 @@ def cpft_draft_2_combined():
 
     # Doctors
     n_south_sho = 14
-    south_base_sho = Doctor("SOUTH_BASE_SHO", [
+    south_base_sho = Doctor("South prototype SHO", [
         s_sho_night, s_sho_night, s_sho_night, s_sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         s_sho_late1, s_sho_late1, nwd, nwd, nwd, nwd, nwd,
@@ -2632,13 +2855,13 @@ def cpft_draft_2_combined():
 
     # Doctors
     n_north_sho = 12
-    north_base_sho = Doctor("NORTH_BASE_SHO", [
+    north_base_sho = Doctor("North prototype SHO", [
         # The same pattern as the South fails (i.e. yields 2B) because there
         # are slightly fewer doctors.
         n_sho_night, n_sho_night, n_sho_night, n_sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         n_sho_late1, n_sho_late1, nwd, nwd, nwd, nwd, nwd,
-        nwd, nwd, n_sho_late1, n_sho_late1, nwd, nwd, nwd,
+        nwd, nwd, n_sho_late1, n_sho_late1, off, nwd, nwd,  # INSERT OFF
         nwd, nwd, nwd, off, n_sho_late1, n_sho_late1, n_sho_late1,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         n_sho_late2, n_sho_late2, nwd, nwd, nwd, nwd, nwd,
@@ -2657,7 +2880,7 @@ def cpft_draft_2_combined():
 
     n_spr = 18  # 18 normal; 12 works at 40%; 11 doesn't quite
     #
-    base_spr = Doctor("BASE_SPR", [
+    base_spr = Doctor("Prototype SpR", [
         # Mon ... Sun
         spr_night, spr_night, spr_night, spr_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
@@ -2690,6 +2913,7 @@ def cpft_draft_2_combined():
         "CPFT draft 2, combined North/South", shifts, doctors,
         start_date=datetime.date(2015, 8, 5),  # Wednesday
         nwd_shifts=[nwd],
+        prototypes=[south_base_sho, north_base_sho, base_spr],
         comments=[
             "<b>Synopsis:</b> combine SpRs across North/South.",
             "<b>Author:</b> Rudolf Cardinal, Aug 2015.",
@@ -2741,7 +2965,7 @@ def cpft_draft_2_combined():
                 <li><b>Better normal working day coverage, on average.</b>
                 Specifically:
                 <ul>
-                    <li>North SHOs improve from 54–61% to 61–66%.</li>
+                    <li>North SHOs improve from 54–61% to 60–64%.</li>
                     <li>South SHOs worsen from 71–76% to 68–72%.</li>
                     <li>SpRs improve from 56–60% (North) and 71–74% (South)
                     to 83–91%.</li>
@@ -2859,7 +3083,7 @@ def cpft_draft_3_split():
 
     # Doctors
     n_south_sho = 14
-    south_base_sho = Doctor("SOUTH_BASE_SHO", [
+    south_base_sho = Doctor("South prototype SHO", [
         s_sho_night, s_sho_night, s_sho_night, s_sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         s_sho_late1, s_sho_late1, nwd, nwd, nwd, nwd, nwd,
@@ -2882,13 +3106,13 @@ def cpft_draft_3_split():
 
     # Doctors
     n_north_sho = 12
-    north_base_sho = Doctor("NORTH_BASE_SHO", [
+    north_base_sho = Doctor("North prototype SHO", [
         # The same pattern as the South fails (i.e. yields 2B) because there
         # are slightly fewer doctors.
         n_sho_night, n_sho_night, n_sho_night, n_sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         n_sho_late1, n_sho_late1, nwd, nwd, nwd, nwd, nwd,
-        nwd, nwd, n_sho_late1, n_sho_late1, nwd, nwd, nwd,
+        nwd, nwd, n_sho_late1, n_sho_late1, off, nwd, nwd,  # INSERT OFF
         nwd, nwd, nwd, off, n_sho_late1, n_sho_late1, n_sho_late1,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         n_sho_late2, n_sho_late2, nwd, nwd, nwd, nwd, nwd,
@@ -2906,7 +3130,7 @@ def cpft_draft_3_split():
             north_base_sho.copy("N" + str(i + 1), rotate=i*7))
 
     n_north_spr = 9
-    north_base_spr = Doctor("NORTH_BASE_SPR", [
+    north_base_spr = Doctor("North prototype SpR", [
         # Mon ... Sun
 
         # block with no lates:
@@ -2927,7 +3151,7 @@ def cpft_draft_3_split():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, n_spr_night, n_spr_night, n_spr_night,
         off, nwd, nwd, nwd, nwd, nwd, nwd,
-        nwd, nwd, spr_late, spr_late, nwd, nwd, nwd,
+        nwd, nwd, spr_late, spr_late, off, nwd, nwd,  # INSERT OFF
         spr_late, spr_late, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
     ], leave_weeks_per_year=6)
@@ -2938,7 +3162,7 @@ def cpft_draft_3_split():
         north_sprs.append(north_base_spr.copy("NR" + str(i + 1), rotate=i*7))
 
     n_south_spr = 9
-    south_base_spr = Doctor("SOUTH_BASE_SPR", [
+    south_base_spr = Doctor("South prototype SpR", [
         # Mon ... Sun
         # block with lates:
         s_spr_night, s_spr_night, s_spr_night, s_spr_night, off, nwd, nwd,
@@ -2947,7 +3171,7 @@ def cpft_draft_3_split():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, s_spr_night, s_spr_night, s_spr_night,
         off, nwd, nwd, nwd, nwd, nwd, nwd,
-        nwd, nwd, spr_late, spr_late, nwd, nwd, nwd,
+        nwd, nwd, spr_late, spr_late, off, nwd, nwd,  # INSERT OFF
         spr_late, spr_late, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
 
@@ -2975,6 +3199,8 @@ def cpft_draft_3_split():
         "North/South at night", shifts, doctors,
         start_date=datetime.date(2015, 8, 5),  # Wednesday
         nwd_shifts=[nwd],
+        prototypes=[south_base_sho, north_base_sho,
+                    north_base_spr, south_base_spr],
         comments=[
             "<b>Synopsis:</b> North and South SpRs are split at night (two 1:9"
             " rotas), but there is a combined (1:18) evening SpR rota."
@@ -3053,7 +3279,7 @@ def cpft_draft_4_split():
 
     # Doctors
     n_south_sho = 14
-    south_base_sho = Doctor("SOUTH_BASE_SHO", [
+    south_base_sho = Doctor("South prototype SHO", [
         s_sho_night, s_sho_night, s_sho_night, s_sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         s_sho_late1, s_sho_late1, nwd, nwd, nwd, nwd, nwd,
@@ -3076,13 +3302,13 @@ def cpft_draft_4_split():
 
     # Doctors
     n_north_sho = 12
-    north_base_sho = Doctor("NORTH_BASE_SHO", [
+    north_base_sho = Doctor("North prototype SHO", [
         # The same pattern as the South fails (i.e. yields 2B) because there
         # are slightly fewer doctors.
         n_sho_night, n_sho_night, n_sho_night, n_sho_night, off, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         n_sho_late1, n_sho_late1, nwd, nwd, nwd, nwd, nwd,
-        nwd, nwd, n_sho_late1, n_sho_late1, nwd, nwd, nwd,
+        nwd, nwd, n_sho_late1, n_sho_late1, off, nwd, nwd,  # INSERT OFF
         nwd, nwd, nwd, off, n_sho_late1, n_sho_late1, n_sho_late1,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         n_sho_late2, n_sho_late2, nwd, nwd, nwd, nwd, nwd,
@@ -3100,11 +3326,11 @@ def cpft_draft_4_split():
             north_base_sho.copy("N" + str(i + 1), rotate=i*7))
 
     n_north_spr = 9
-    north_base_spr = Doctor("NORTH_BASE_SPR", [
+    north_base_spr = Doctor("North prototype SpR", [
         # Mon ... Sun
 
         # block with no nights:
-        nwd, nwd, n_spr_late, n_spr_late, nwd, nwd, nwd,
+        nwd, nwd, n_spr_late, n_spr_late, off, nwd, nwd,  # INSERT OFF
         n_spr_late, n_spr_late, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
@@ -3115,7 +3341,7 @@ def cpft_draft_4_split():
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
 
         # block with nights:
-        nwd, nwd, n_spr_late, n_spr_late, nwd, nwd, nwd,
+        nwd, nwd, n_spr_late, n_spr_late, off, nwd, nwd,  # INSERT OFF
         n_spr_late, n_spr_late, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         spr_night, spr_night, spr_night, spr_night, off, nwd, nwd,
@@ -3132,10 +3358,10 @@ def cpft_draft_4_split():
         north_sprs.append(north_base_spr.copy("NR" + str(i + 1), rotate=i*7))
 
     n_south_spr = 9
-    south_base_spr = Doctor("SOUTH_BASE_SPR", [
+    south_base_spr = Doctor("South prototype SpR", [
         # Mon ... Sun
         # block with nights:
-        nwd, nwd, s_spr_late, s_spr_late, nwd, nwd, nwd,
+        nwd, nwd, s_spr_late, s_spr_late, off, nwd, nwd,  # INSERT OFF
         s_spr_late, s_spr_late, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         spr_night, spr_night, spr_night, spr_night, off, nwd, nwd,
@@ -3146,7 +3372,7 @@ def cpft_draft_4_split():
         off, nwd, nwd, nwd, nwd, nwd, nwd,
 
         # block with no nights:
-        nwd, nwd, s_spr_late, s_spr_late, nwd, nwd, nwd,
+        nwd, nwd, s_spr_late, s_spr_late, off, nwd, nwd,  # INSERT OFF
         s_spr_late, s_spr_late, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
         nwd, nwd, nwd, nwd, nwd, nwd, nwd,
@@ -3169,6 +3395,8 @@ def cpft_draft_4_split():
         "North/South SpRs at night", shifts, doctors,
         start_date=datetime.date(2015, 8, 5),  # Wednesday
         nwd_shifts=[nwd],
+        prototypes=[south_base_sho, north_base_sho,
+                    north_base_spr, south_base_spr],
         comments=[
             "<b>Synopsis:</b> North and South SpRs are split in the evening "
             "(two 1:9 rotas), but combined (1:18) at night.",
@@ -3187,6 +3415,7 @@ def cpft_draft_4_split():
 # =============================================================================
 
 ROTA_GENERATORS = OrderedDict([
+    ('test_prospective_cover', test_prospective_cover),
     ('cpft_actual_aug2015_south', cpft_actual_aug2015_south),
     ('cpft_actual_aug2015_north', cpft_actual_aug2015_north),
     ('cpft_draft_1_south', cpft_draft_1_south),
@@ -3196,13 +3425,14 @@ ROTA_GENERATORS = OrderedDict([
 ])
 
 
-def process_rota(rotaname, daynums=False, skipanalytics=False):
+def process_rota(rotaname, daynums=False, skipanalytics=False,
+                 noprototypes=False):
     if rotaname not in ROTA_GENERATORS:
         raise ValueError("Invalid rota: " + rotaname)
     fn = ROTA_GENERATORS[rotaname]
     rota = fn()
     filename = rotaname + ".html"
-    rota.print_html(filename, daynums, skipanalytics)
+    rota.print_html(filename, daynums, skipanalytics, noprototypes)
 
 
 # =============================================================================
@@ -3229,18 +3459,23 @@ Version {}
         help="Show day numbers as well as dates")
     parser.add_argument(
         "-s", "--skipanalytics", action="store_true",
-        help="Show pattern only, without analytics")
+        help="Skip analyses")
+    parser.add_argument(
+        "-n", "--noprototypes", action="store_true",
+        help="Skip prototype patterns")
     args = parser.parse_args()
 
     if args.all:
         for rotaname in ROTA_GENERATORS.keys():
-            process_rota(rotaname, args.daynums, args.skipanalytics)
+            process_rota(rotaname, args.daynums, args.skipanalytics,
+                         args.noprototypes)
     else:
         if not args.rota:
             parser.print_help()
             sys.exit(1)
         for rotaname in args.rota:
-            process_rota(rotaname, args.daynums, args.skipanalytics)
+            process_rota(rotaname, args.daynums, args.skipanalytics,
+                         args.noprototypes)
 
 
 # =============================================================================
