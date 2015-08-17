@@ -52,13 +52,18 @@ Version history (see VERSION below)
     - SpR components of CPFT drafts 3/4 changed similarly.
     - Default specification of rotas is now by weekday-based pattern, not by
       absolute date.
+
+    1.3 (2015-08-15)
+    - LTFT calculations.
+    - New BandingInfo() class.
+    - Shift count display by doctor.
 """
 
 # =============================================================================
 # Version
 # =============================================================================
 
-VERSION = 1.2
+VERSION = 1.3
 
 # =============================================================================
 # Imports
@@ -134,13 +139,21 @@ BANK_HOLIDAYS = [datetime.datetime.strptime(x, "%Y-%m-%d").date() for x in [
 
 SUPPLEMENT = {
     # [BMA_1]
+    # Full time:
     "3": 1.0,
     "2A": 0.8,
     "2B": 0.5,
     "1A": 0.5,
     "1B": 0.4,
     "1C": 0.2,
+    # LTFT:
+    "FA": 0.5,
+    "FB": 0.4,
+    "FC": 0.2,
+    # No banding (could call it band 0, or None; we'll use None)
     None: 0,
+    # Failure code
+    "?": 0,
 }
 
 SHIFT_TYPES = AttrDict({
@@ -1102,23 +1115,462 @@ class Shift(object):
 
 
 # =============================================================================
+# Structure to hold banding information/calculations
+# =============================================================================
+
+class BandingInfo(object):
+    """Object representing banding info calculations."""
+
+    def __init__(self,
+                 hours_per_week,
+                 hours_per_week_inc_pc,
+                 fraction_weekends_worked,
+                 fraction_hours_ooh,
+                 max_continuous_hours,
+                 max_continuous_hours_interval,
+                 min_rest_between_duties_h,
+                 min_rest_between_duties_interval,
+                 max_continuous_duty_days,
+                 max_continuous_duty_interval,
+                 off_24h_every_7d,
+                 off_24h_every_7d_ffi,
+                 off_48h_every_14d,
+                 off_48h_every_14d_ffi,
+                 one_48h_and_one_62h_off_every_21d,
+                 one_48h_and_one_62h_off_every_21d_ffi,
+                 one_48h_and_one_62h_off_every_28d,
+                 one_48h_and_one_62h_off_every_28d_ffi,
+                 on_call_freq,
+                 on_call_freq_inc_pc,
+                 resident,
+                 resident_after_7pm,
+                 work4h_after7pm_halformore,
+                 shift_types,
+                 ltft,
+                 any_outside_8am7pm_weekdays):
+        self.hours_per_week = hours_per_week
+        self.hours_per_week_inc_pc = hours_per_week_inc_pc
+        self.fraction_weekends_worked = fraction_weekends_worked
+        self.fraction_hours_ooh = fraction_hours_ooh
+        self.max_continuous_hours = max_continuous_hours
+        self.max_continuous_hours_interval = max_continuous_hours_interval
+        self.min_rest_between_duties_h = min_rest_between_duties_h
+        self.min_rest_between_duties_interval = \
+            min_rest_between_duties_interval
+        self.max_continuous_duty_days = max_continuous_duty_days
+        self.max_continuous_duty_interval = max_continuous_duty_interval
+        self.off_24h_every_7d = off_24h_every_7d
+        self.off_24h_every_7d_ffi = off_24h_every_7d_ffi
+        self.off_48h_every_14d = off_48h_every_14d
+        self.off_48h_every_14d_ffi = off_48h_every_14d_ffi
+        self.one_48h_and_one_62h_off_every_21d = \
+            one_48h_and_one_62h_off_every_21d
+        self.one_48h_and_one_62h_off_every_21d_ffi = \
+            one_48h_and_one_62h_off_every_21d_ffi
+        self.one_48h_and_one_62h_off_every_28d = \
+            one_48h_and_one_62h_off_every_28d
+        self.one_48h_and_one_62h_off_every_28d_ffi = \
+            one_48h_and_one_62h_off_every_28d_ffi
+        self.on_call_freq = on_call_freq
+        self.on_call_freq_inc_pc = on_call_freq_inc_pc
+        self.resident = resident
+        self.resident_after_7pm = resident_after_7pm
+        self.work4h_after7pm_halformore = work4h_after7pm_halformore
+        self.shift_types = shift_types
+        self.ltft = ltft
+        self.any_outside_8am7pm_weekdays = any_outside_8am7pm_weekdays
+
+        # Key calculated information
+        self.calculated = False
+        self.banding = "?"
+        self.decisions = []
+
+        # Other calculations used for the flowchart
+
+        self.more_than_48h = self.hours_per_week_inc_pc > 48
+        self.one_weekend_in_three_or_more = (
+            self.fraction_weekends_worked >= 1/3
+        )
+        self.one_weekend_in_four_or_more = (
+            self.fraction_weekends_worked >= 1/4
+        )
+        self.one_weekend_in_sixhalf_or_more = (
+            self.fraction_weekends_worked >= 1/6.5
+        )
+        self.more_than_third_hours_outside_normal = (
+            self.fraction_hours_ooh > 1/3
+        )
+        self.fulfil_criterion_r = (
+            self.resident_after_7pm
+            or self.work4h_after7pm_halformore
+        )
+        self.criterion_r_reasoning = (
+            " [CRITERION R WORKING: Resident after 7pm? "
+            + yesno(self.resident_after_7pm)
+            + " / 4h work after 7pm on >=50% occasions, from monitoring? "
+            + yesno(self.work4h_after7pm_halformore)
+            + "]"
+        )
+
+        self.one_in_six_or_more_inc_pc = self.on_call_freq_inc_pc >= 1/6
+        self.one_in_eight_or_more_inc_pc = self.on_call_freq_inc_pc >= 1/8
+        self.one_in_eight_without_pc_or_less = self.on_call_freq <= 1/8
+
+        self.one_in_ten_or_more_inc_pc = self.on_call_freq_inc_pc >= 1/10
+        self.one_in_thirteenhalf_or_more_inc_pc = \
+            self.on_call_freq_inc_pc >= 1/13.5
+        self.one_in_thirteenhalf_without_pc_or_less = \
+            self.on_call_freq <= 1/13.5
+
+        # Other LTFT calculations
+        self.ltft_basic_salary_band = None
+        self.basic_salary_fraction = None
+
+        # Calculated later
+        self.rest_compliant = None
+        self.main_shift_type = None
+        self.on_call_rota = None
+
+        # OK, do the calculations now
+        self.calculate()
+
+    def decide(self, decision):
+        """Adds a decision manually."""
+        self.decisions.append(decision)
+
+    def calculate(self):
+        """Calculates rest compliance (New Deal/Working Time Regulations).
+        Stores information in self.rest_compliant and self.decisions."""
+
+        if self.calculated:
+            return
+        self.calculated = True
+
+        if self.shift_types:
+            self.main_shift_type = self.shift_types[0]
+            self.decide("Rota type: {}".format(self.main_shift_type))
+            if len(self.shift_types) > 1:
+                self.decide(
+                    "WARNING: HYBRID ROTA; CONFUSED; ASSUMING {}".format(
+                        self.main_shift_type))
+        else:
+            self.decide("WARNING: NO SHIFT TYPES")
+            self.main_shift_type = None
+
+        self.on_call_rota = "On-call" in self.shift_types
+
+        (
+            self.ltft_basic_salary_band,
+            self.basic_salary_fraction
+        ) = self.get_ltft_basic(self.hours_per_week_inc_pc)
+
+        # ---------------------------------------------------------------------
+        # Rest/time off
+        # ---------------------------------------------------------------------
+
+        self.rest_compliant = True
+        # (a) Working hours
+        if self.hours_per_week_inc_pc > 56:
+            self.rest_compliant = False
+            self.decide("ND fail: >56 h/week on average (inc. PC)")
+        if self.hours_per_week_inc_pc > 48:
+            # rest_compliant = False
+            self.decide("WARNING: WTR fail: >48 h/week on average "
+                        "(inc. PC); PROCEEDING ANYWAY.")
+        if self.max_continuous_hours > 13:
+            self.rest_compliant = False
+            self.decide(
+                "WTR fail: >13 continuous hours (would need compensatory rest)"
+                " (first failure: {})".format(
+                    self.max_continuous_hours_interval))
+        if self.main_shift_type in [SHIFT_TYPES.FULL, SHIFT_TYPES.PARTIAL,
+                                    SHIFT_TYPES.PARTIAL24]:
+            if self.min_rest_between_duties_h < 11:
+                self.rest_compliant = False
+                self.decide(
+                    "WTR fail: <11 h rest between duties (would need "
+                    "compensatory rest) (first failure: {}".format(
+                        self.min_rest_between_duties_interval))
+        elif self.main_shift_type == SHIFT_TYPES.ONCALL:
+            if self.min_rest_between_duties_h < 12:
+                self.rest_compliant = False
+                self.decide(
+                    "ND/WTR fail: <12 h rest between duties "
+                    "(first failure: {})".format(
+                        self.min_rest_between_duties_interval))
+
+        # (b) Time off
+        if self.main_shift_type in [SHIFT_TYPES.FULL, SHIFT_TYPES.PARTIAL,
+                                    SHIFT_TYPES.PARTIAL24]:
+            if not self.one_48h_and_one_62h_off_every_28d:
+                self.rest_compliant = False
+                self.decide(
+                    "ND fail: does not provide one period of 48h off and one "
+                    "period of 62h off every 28 days "
+                    "(first failure: {})".format(
+                        one_48h_and_one_62h_off_every_28d_ffi))
+        elif self.main_shift_type == SHIFT_TYPES.ONCALL:
+            if not self.one_48h_and_one_62h_off_every_21d:
+                self.rest_compliant = False
+                self.decide(
+                    "ND fail: does not provide one period of 48h off and one "
+                    "period of 62h off every 21 days "
+                    "(first failure: {})".format(
+                        one_48h_and_one_62h_off_every_21d_ffi))
+        if not(self.off_24h_every_7d or self.off_48h_every_14d):
+            self.rest_compliant = False
+            msg = "WTR fail: not 24h off every 7d, or 48h off every 14d"
+            if not self.off_24h_every_7d:
+                msg += " (24h q7d first failure: {})".format(
+                    self.off_24h_every_7d_ffi)
+            if not self.off_48h_every_14d:
+                msg += " (48h q14d first failure: {})".format(
+                    self.off_48h_every_14d_ffi)
+            self.decide(msg)
+        if self.max_continuous_duty_days > 13:
+            self.rest_compliant = False
+            self.decide(
+                "WTR fail: >13 continuous duty days "
+                "(first failure: {})".format(
+                    self.max_continuous_duty_interval))
+
+        # (c) Rest at work
+        self.decide("Natural breaks assumed OK")
+        self.decide("Minimum rest assumed OK")
+        self.decide("Timing of continuous rest assumed OK")
+
+        # ---------------------------------------------------------------------
+        # Other calculations for the flowchart
+        # ---------------------------------------------------------------------
+
+        if self.ltft:
+            self.banding = self.flowchart_ltft()
+        else:
+            self.banding = self.flowchart_ft()
+        self.decide("Band: {}".format(self.banding))
+
+    def flowchart_ft(self):
+        """Full-time flowchart."""
+        # ---------------------------------------------------------------------
+        # FULL TIME
+        # ---------------------------------------------------------------------
+        # The flowchart from the BMA's guide [BMA_1]:
+        self.decide("Full time")
+
+        self.decide("Complies with ND/WTR rest requirements? "
+                    + yesno(self.rest_compliant))
+        if not self.rest_compliant:
+            return "3"  # BAND 3
+
+        self.decide("Out of hours work? " + yesno(self.fraction_hours_ooh > 0))
+        if not self.fraction_hours_ooh > 0:
+            return None  # No supplement
+
+        self.decide(">48h of actual work (inc. PC)? "
+                    + yesno(self.more_than_48h))
+        if self.more_than_48h:
+            self.decide("On call rota? " + yesno(self.on_call_rota))
+            if self.on_call_rota:
+                self.decide(
+                    "1:6 or more inc. PC? "
+                    + yesno(self.one_in_six_or_more_inc_pc)
+                    + " / 1:3 weekends or more? "
+                    + yesno(self.one_weekend_in_three_or_more)
+                )
+                if (self.one_in_six_or_more_inc_pc
+                        or self.one_weekend_in_three_or_more):
+                    self.decide("Fulfil criterion R? "
+                                + yesno(self.fulfil_criterion_r)
+                                + self.criterion_r_reasoning)
+                    if self.fulfil_criterion_r:
+                        return "2A"  # BAND 2A
+                    # Not Criterion R
+                    return "2B"  # BAND 2B
+                # Not 1/6 or more or 1/3 weekends or more
+                return "2B"  # BAND 2B
+
+            # Not on-call rota
+            self.decide(
+                ">1/3 hours outside 7am-7pm Mon-Fri? "
+                + yesno(self.more_than_third_hours_outside_normal)
+                + " / 1:3 weekends or more? "
+                + yesno(self.one_weekend_in_three_or_more)
+            )
+            if (self.more_than_third_hours_outside_normal
+                    or self.one_weekend_in_three_or_more):
+                return "2A"  # BAND 2A
+            return "2B"  # BAND 2B
+
+        # Not more than 48h
+        self.decide("On call rota? " + yesno(self.on_call_rota))
+        if not self.on_call_rota:
+            # Not on-call rota
+            self.decide(
+                ">1/3 hours outside 7am-7pm Mon-Fri? "
+                + yesno(self.more_than_third_hours_outside_normal)
+                + " / 1:4 weekends or more? "
+                + yesno(self.one_weekend_in_four_or_more)
+            )
+            if (self.more_than_third_hours_outside_normal
+                    or self.one_weekend_in_four_or_more):
+                return "1A"  # BAND 1A
+            return "1B"  # BAND 1B
+
+        # On-call rota
+        self.decide(
+            "1:6 or more inc. PC? "
+            + yesno(self.one_in_six_or_more_inc_pc)
+        )
+        if self.one_in_six_or_more_inc_pc:
+            return "1A"  # BAND 1A
+
+        self.decide(
+            "1:8 or more inc. PC? "
+            + yesno(self.one_in_eight_or_more_inc_pc)
+            + " / 1:4 weekends or more? "
+            + yesno(self.one_weekend_in_four_or_more)
+        )
+        if (self.one_in_eight_or_more_inc_pc
+                or self.one_weekend_in_four_or_more):
+            self.decide("Fulfil criterion R? "
+                        + yesno(self.fulfil_criterion_r)
+                        + self.criterion_r_reasoning)
+            if self.fulfil_criterion_r:
+                return "1A"  # BAND 1A
+            return "1B"  # BAND 1B
+
+        self.decide("1:8 without PC or less? "
+                    + yesno(self.one_in_eight_without_pc_or_less))
+        if not self.one_in_eight_without_pc_or_less:
+            return "1B"  # BAND 1B
+
+        self.decide(
+            "Resident (clinically/contractually)? "
+            + yesno(self.resident)
+        )
+        if self.resident:
+            return "1B"  # BAND 1B
+        return "1C"  # BAND 1C
+
+    def flowchart_ltft(self):
+        """LTFT flowchart."""
+        # ---------------------------------------------------------------------
+        # LESS THAN FULL TIME
+        # ---------------------------------------------------------------------
+        # The flowchart from the BMA's guide [BMA_1]:
+        self.decide("LTFT")
+        self.decide("Complies with ND/WTR rest requirements? "
+                    + yesno(self.rest_compliant))
+        if not self.rest_compliant:
+            return "3"  # BAND 3
+
+        self.decide("Any work outside 8am-7pm Mon-Fri? "
+                    + yesno(self.any_outside_8am7pm_weekdays))
+        if not self.any_outside_8am7pm_weekdays:
+            return None  # no supplement
+
+        self.decide("On call rota? " + yesno(self.on_call_rota))
+        if not self.on_call_rota:
+            # Not on-call rota
+            self.decide(
+                ">1/3 hours outside 7am-7pm Mon-Fri? "
+                + yesno(self.more_than_third_hours_outside_normal)
+                + " / 1:6.5 weekends or more? "
+                + yesno(self.one_weekend_in_sixhalf_or_more)
+            )
+            if (self.more_than_third_hours_outside_normal
+                    or self.one_weekend_in_sixhalf_or_more):
+                return "FA"  # BAND FA
+            return "FB"  # BAND FB
+
+        # On-call rota
+        self.decide(
+            "1:10 or more inc. PC? "
+            + yesno(self.one_in_ten_or_more_inc_pc)
+        )
+        if self.one_in_ten_or_more_inc_pc:
+            return "FA"  # BAND FA
+
+        self.decide(
+            "1:13.5 or more inc. PC? "
+            + yesno(self.one_in_thirteenhalf_or_more_inc_pc)
+            + " / 1:6.5 weekends or more? "
+            + yesno(self.one_weekend_in_sixhalf_or_more)
+        )
+        if (self.one_in_thirteenhalf_or_more_inc_pc
+                or self.one_weekend_in_sixhalf_or_more):
+            self.decide("Fulfil criterion R? "
+                        + yesno(self.fulfil_criterion_r)
+                        + self.criterion_r_reasoning)
+            if self.fulfil_criterion_r:
+                return "FA"  # BAND FA
+            return "FB"  # BAND FB
+
+        self.decide("1:13.5 without PC or less? "
+                    + yesno(self.one_in_thirteenhalf_without_pc_or_less))
+        if not self.one_in_thirteenhalf_without_pc_or_less:
+            return "FB"  # BAND FB
+
+        self.decide(
+            "Resident (clinically/contractually)? "
+            + yesno(self.resident)
+        )
+        if self.resident:
+            return "FB"  # BAND FB
+        return "FC"  # BAND FC
+
+    def get_ltft_basic(self, hours_per_week):
+        """
+            hours_per_week: "hours of actual work (including out-of-hours)",
+                and presumably including prospective cover.
+            Returns tuple: (ltft_basic_salary_band, basic_salary_fraction)
+        """
+        if not self.ltft:
+            return None, 1
+        if hours_per_week < 20:
+            return '? (too low)', None
+        if hours_per_week < 24:
+            return 'F5', 0.5
+        if hours_per_week < 28:
+            return 'F6', 0.6
+        if hours_per_week < 32:
+            return 'F7', 0.7
+        if hours_per_week < 36:
+            return 'F8', 0.8
+        if hours_per_week < 40:
+            return 'F9', 0.9
+        return '? (too high)', 1
+
+
+# =============================================================================
 # Doctor definition
 # =============================================================================
 
 class Doctor(object):
     """Object representing a doctor."""
 
-    def __init__(self, name, daypattern, leave_weeks_per_year, ooh_roles=None):
+    def __init__(self, name, daypattern, leave_weeks_per_year,
+                 hours_per_leave_week=40,
+                 ooh_roles=None,
+                 ltft=False):
         """
         Initializes the Doctor object.
 
         name: generic name for this doctor, e.g. "SHO 1"
         daypattern: list of Shift objects
+        leave_weeks_per_year: obvious
+        hours_per_leave_week: usually 40; the number of hours in a 'base' week,
+            used for leave calculations; <40 for LTFT doctors
+        ooh_roles: list of person-specific out-of-hours roles (as strings),
+            e.g. Section 12 MHA approval
+        ltft: less-than-full-time?
         """
         self.name = name
         self.daypattern = list(daypattern)
         self.leave_weeks_per_year = leave_weeks_per_year
+        self.hours_per_leave_week = hours_per_leave_week
         self.ooh_roles = [] if ooh_roles is None else list(ooh_roles)
+        self.ltft = ltft
         # Check no shifts overlap
         intervals = []
         for i in range(len(daypattern)):
@@ -1131,14 +1583,30 @@ class Doctor(object):
             raise ValueError(
                 "Doctor creation failed: overlapping shifts: {}".format(self))
 
+    def copy(self, name=None, rotate=0):
+        """Makes a copy of the Doctor object, optionally renaming it and
+        rotating the shift pattern. Used to make lots of doctors with the same
+        pattern as the starting point."""
+        myclone = Doctor(name or self.name, self.daypattern,
+                         self.leave_weeks_per_year,
+                         hours_per_leave_week=self.hours_per_leave_week,
+                         ooh_roles=self.ooh_roles,
+                         ltft=self.ltft)
+        l = self.get_pattern_length()
+        rotate = rotate % l
+        myclone.rotate(rotate)
+        return myclone
+
     def __repr__(self):
         return (
             "Doctor(name={}, daypattern={}, leave_weeks_per_year={}, "
-            "ooh_roles={})".format(
+            "hours_per_leave_week={}, ooh_roles={}, ltft={})".format(
                 repr(self.name),
                 repr(self.daypattern),
                 self.leave_weeks_per_year,
+                self.hours_per_leave_week,
                 self.ooh_roles if self.ooh_roles else None,
+                self.ltft,
             )
         )
 
@@ -1234,17 +1702,6 @@ class Doctor(object):
             pattern_idx %= l
         return None
 
-    def copy(self, name=None, rotate=0):
-        """Makes a copy of the Doctor object, optionally renaming it and
-        rotating the shift pattern. Used to make lots of doctors with the same
-        pattern as the starting point."""
-        myclone = Doctor(name or self.name, self.daypattern,
-                         self.leave_weeks_per_year, self.ooh_roles)
-        l = self.get_pattern_length()
-        rotate = rotate % l
-        myclone.rotate(rotate)
-        return myclone
-
     def get_all_times(self, rota_start_time):
         """Returns all shift start/end times, as a list of datetime.datetime
         objects."""
@@ -1296,47 +1753,45 @@ class Doctor(object):
         return il
 
     def banding_info(self, rota):
-        """Useful information for banding calculations. Returns the tuple:
-        (
-            hours_per_week,
-            hours_per_week_inc_pc,
-            fraction_weekends_worked,
-            fraction_hours_ooh,
-            max_continuous_hours,
-            max_continuous_hours_interval,
-            min_rest_between_duties_h,
-            min_rest_between_duties_interval,
-            max_continuous_duty_days,
-            max_continuous_duty_interval,
-            off_24h_every_7d,
-            off_24h_every_7d_ffi,
-            off_48h_every_14d,
-            off_48h_every_14d_ffi,
-            one_48h_and_one_62h_off_every_21d,
-            one_48h_and_one_62h_off_every_21d_ffi,
-            one_48h_and_one_62h_off_every_28d,
-            one_48h_and_one_62h_off_every_28d_ffi,
-        )
+        """Useful information for banding calculations. Returns a BandingInfo
+        object.
+
         This is the SLOWEST part.
         """
-        logger.debug("  ... banding calcs part 1 for {}".format(self.name))
+        logger.debug("  ... banding calcs for {}".format(self.name))
+
+        # ---------------------------------------------------------------------
+        # Basic rota and work pattern information
+        # ---------------------------------------------------------------------
         rota_interval = Interval.dayspan(rota.start_date, rota.end_date,
                                          include_end=True)
+        rota_days = convert_duration(rota_interval.duration(), 'd')
         rota_weeks = convert_duration(rota_interval.duration(), 'w')
         workpattern = self.get_work_pattern(rota.start_date, rota.end_date)
-        total_work_hours = convert_duration(workpattern.total_duration(), 'h')
         rota_weekends = rota_interval.n_weekends()
+
+        # ---------------------------------------------------------------------
+        # Antisocial hours
+        # ---------------------------------------------------------------------
+        total_work_hours = convert_duration(workpattern.total_duration(), 'h')
         weekends_worked = workpattern.n_weekends()
         ooh = convert_duration(
             workpattern.duration_outside_nwh(
                 starttime=datetime.time(7),
                 endtime=datetime.time(19)
             ), 'h')
-
-        hours_per_week = total_work_hours / rota_weeks
         fraction_weekends_worked = weekends_worked / rota_weekends
         fraction_hours_ooh = ooh / total_work_hours
+        any_outside_8am7pm_weekdays = convert_duration(
+            workpattern.duration_outside_nwh(
+                starttime=datetime.time(8),
+                endtime=datetime.time(19)
+            ), 'h') > 0
 
+        # ---------------------------------------------------------------------
+        # Hours per week
+        # ---------------------------------------------------------------------
+        hours_per_week = total_work_hours / rota_weeks
         if rota.prospective_cover:
             # the alternative Riddell formula uses the rota cycle rather than
             # the whole rota, but is equivalent; equivalents given
@@ -1344,7 +1799,7 @@ class Doctor(object):
             non_leave_weeks = rota_weeks - leave_weeks  # B - E
             hours_if_no_leave_taken = total_work_hours  # D
             hours_per_leave_week_not_covered_by_others = (
-                rota.hours_per_leave_week
+                self.hours_per_leave_week
             )  # C
             hours_removed_by_leave = (
                 leave_weeks
@@ -1361,14 +1816,43 @@ class Doctor(object):
         else:
             hours_per_week_inc_pc = hours_per_week
 
+        # ---------------------------------------------------------------------
+        # On-call frequency
+        # ---------------------------------------------------------------------
+        n_on_calls = self.n_on_calls(rota.start_date, rota.end_date)
+        on_call_freq = n_on_calls / rota_days
+        if rota.prospective_cover:
+            # Similarly, concept derived for on-call frequency (RNC)
+            leave_weeks = (self.leave_weeks_per_year / 52) * rota_weeks
+            impossible_oncall_days = leave_weeks * 7
+            # ... or 5? Presume 7 (a week off doesn't mean just weekdays off).
+            possible_oncall_days = rota_days - impossible_oncall_days
+            on_call_freq_inc_pc = n_on_calls / possible_oncall_days
+        else:
+            on_call_freq_inc_pc = on_call_freq
+
+        # ---------------------------------------------------------------------
+        # Residency
+        # ---------------------------------------------------------------------
+        resident = any(s.resident for s in self.daypattern)
+        resident_after_7pm = any(
+            s.resident and s.includes_7pm_to_7am()
+            for s in self.daypattern
+        )
+
+        # ---------------------------------------------------------------------
+        # Rest
+        # ---------------------------------------------------------------------
         max_continuous_hours_interval = workpattern.longest_interval()
         max_continuous_hours = \
             max_continuous_hours_interval.duration_in('h')
         min_rest_between_duties_interval = workpattern.shortest_gap()
         min_rest_between_duties_h = \
             min_rest_between_duties_interval.duration_in('h')
-        (max_continuous_duty_days,
-         max_continuous_duty_interval) = workpattern.max_continuous_days()
+        (
+            max_continuous_duty_days,
+            max_continuous_duty_interval
+        ) = workpattern.max_continuous_days()
 
         # _ffi: first failure interval
         (off_24h_every_7d, off_24h_every_7d_ffi) = workpattern.sufficient_gaps(
@@ -1407,7 +1891,15 @@ class Doctor(object):
                 ]
             )
 
-        return (
+        # ---------------------------------------------------------------------
+        # Shift types
+        # ---------------------------------------------------------------------
+        shift_types = self.get_shift_types()
+
+        # ---------------------------------------------------------------------
+        # Create and return BandingInfo object
+        # ---------------------------------------------------------------------
+        return BandingInfo(
             hours_per_week,
             hours_per_week_inc_pc,
             fraction_weekends_worked,
@@ -1426,6 +1918,14 @@ class Doctor(object):
             one_48h_and_one_62h_off_every_21d_ffi,
             one_48h_and_one_62h_off_every_28d,
             one_48h_and_one_62h_off_every_28d_ffi,
+            on_call_freq,
+            on_call_freq_inc_pc,
+            resident,
+            resident_after_7pm,
+            rota.work4h_after7pm_halformore,
+            shift_types,
+            self.ltft,
+            any_outside_8am7pm_weekdays
         )
 
     def get_shift_types(self):
@@ -1435,246 +1935,14 @@ class Doctor(object):
         shift_types = [x for x in shift_types if x is not None]
         return shift_types
 
-    def on_call_frequency(self):
+    def n_on_calls(self, rota_start_date, rota_end_date):
         n = 0
-        for shift in self.daypattern:
+        for (daynum, idx, date) in self.gen_daynum_idx_date(rota_start_date,
+                                                            rota_end_date):
+            shift = self.get_shift_for_day(daynum)
             if shift.shift_type == SHIFT_TYPES.ONCALL:
                 n += 1
-        return n / len(self.daypattern)
-
-    def get_banding(self, rota, banding_info):
-        """What banding should this doctor be paid?
-        Takes as parameters:
-            rota -- the rota
-            banding_info -- the results of self.banding_info(rota)
-                ... passed in manually for speed
-        Returns a tuple: (banding description, decision list)"""
-        decisions = []
-
-        # Calculations used for the flowchart: preamble
-        resident_after_7pm = any(
-            s.resident and s.includes_7pm_to_7am()
-            for s in self.daypattern
-        )
-        (
-            hours_per_week,
-            hours_per_week_inc_pc,
-            fraction_weekends_worked,
-            fraction_hours_ooh,
-            max_continuous_hours,
-            max_continuous_hours_interval,
-            min_rest_between_duties_h,
-            min_rest_between_duties_interval,
-            max_continuous_duty_days,
-            max_continuous_duty_interval,
-            off_24h_every_7d,
-            off_24h_every_7d_ffi,
-            off_48h_every_14d,
-            off_48h_every_14d_ffi,
-            one_48h_and_one_62h_off_every_21d,
-            one_48h_and_one_62h_off_every_21d_ffi,
-            one_48h_and_one_62h_off_every_28d,
-            one_48h_and_one_62h_off_every_28d_ffi,
-        ) = banding_info
-        on_call_freq = self.on_call_frequency()
-        shift_types = self.get_shift_types()
-        if shift_types:
-            main_shift_type = shift_types[0]
-            decisions.append("Rota type: {}".format(main_shift_type))
-            if len(shift_types) > 1:
-                decisions.append(
-                    "WARNING: HYBRID ROTA; CONFUSED; ASSUMING {}".format(
-                        main_shift_type))
-        else:
-            decisions.append("WARNING: NO SHIFT TYPES")
-            main_shift_type = None
-
-        # Rest compliance (New Deal/Working Time Regulations)
-        rest_compliant = True
-        # (a) Working hours
-        if hours_per_week_inc_pc > 56:
-            rest_compliant = False
-            decisions.append("ND fail: >56 h/week on average (inc. PC)")
-        if hours_per_week_inc_pc > 48:
-            # rest_compliant = False
-            decisions.append("WARNING: WTR fail: >48 h/week on average "
-                             "(inc. PC); PROCEEDING ANYWAY.")
-        if max_continuous_hours > 13:
-            rest_compliant = False
-            decisions.append(
-                "WTR fail: >13 continuous hours (would need compensatory rest)"
-                " (first failure: {})".format(max_continuous_hours_interval))
-        if main_shift_type in [SHIFT_TYPES.FULL, SHIFT_TYPES.PARTIAL,
-                               SHIFT_TYPES.PARTIAL24]:
-            if min_rest_between_duties_h < 11:
-                rest_compliant = False
-                decisions.append(
-                    "WTR fail: <11 h rest between duties (would need "
-                    "compensatory rest) (first failure: {}".format(
-                        min_rest_between_duties_interval))
-        elif main_shift_type == SHIFT_TYPES.ONCALL:
-            if min_rest_between_duties_h < 12:
-                rest_compliant = False
-                decisions.append(
-                    "ND/WTR fail: <12 h rest between duties "
-                    "(first failure: {})".format(
-                        min_rest_between_duties_interval))
-        # (b) Time off
-        if main_shift_type in [SHIFT_TYPES.FULL, SHIFT_TYPES.PARTIAL,
-                               SHIFT_TYPES.PARTIAL24]:
-            if not one_48h_and_one_62h_off_every_28d:
-                rest_compliant = False
-                decisions.append(
-                    "ND fail: does not provide one period of 48h off and one "
-                    "period of 62h off every 28 days "
-                    "(first failure: {})".format(
-                        one_48h_and_one_62h_off_every_28d_ffi))
-        elif main_shift_type == SHIFT_TYPES.ONCALL:
-            if not one_48h_and_one_62h_off_every_21d:
-                rest_compliant = False
-                decisions.append(
-                    "ND fail: does not provide one period of 48h off and one "
-                    "period of 62h off every 21 days "
-                    "(first failure: {})".format(
-                        one_48h_and_one_62h_off_every_21d_ffi))
-        if not(off_24h_every_7d or off_48h_every_14d):
-            rest_compliant = False
-            msg = "WTR fail: not 24h off every 7d, or 48h off every 14d"
-            if not off_24h_every_7d:
-                msg += " (24h q7d first failure: {})".format(
-                    off_24h_every_7d_ffi)
-            if not off_48h_every_14d:
-                msg += " (48h q14d first failure: {})".format(
-                    off_48h_every_14d_ffi)
-            decisions.append(msg)
-        if max_continuous_duty_days > 13:
-            rest_compliant = False
-            decisions.append(
-                "WTR fail: >13 continuous duty days "
-                "(first failure: {})".format(max_continuous_duty_interval))
-        # (c) Rest at work
-        decisions.append("Natural breaks assumed OK")
-        decisions.append("Minimum rest assumed OK")
-        decisions.append("Timing of continuous rest assumed OK")
-
-        # Other calculations used for the flowchart
-        more_than_48h = hours_per_week_inc_pc > 48
-        on_call_rota = "On-call" in shift_types
-        if on_call_rota:
-            decisions.append("WARNING: DON’T UNDERSTAND PROSPECTIVE COVER")
-        one_in_six_or_more_inc_pc = on_call_freq >= 1/6
-        one_in_eight_or_more_inc_pc = on_call_freq >= 1/8
-        one_in_eight_without_pc_or_less = on_call_freq < 1/8
-        # ... these three depend on the prospective cover calculation somehow
-        one_weekend_in_three_or_more = fraction_weekends_worked >= 1/3
-        one_weekend_in_four_or_more = fraction_weekends_worked >= 1/4
-        more_than_third_hours_outside_normal = fraction_hours_ooh > 1/3
-        fulfil_criterion_r = (
-            resident_after_7pm
-            or rota.work4h_after7pm_halformore
-        )
-        criterion_r_reasoning = (
-            " [CRITERION R WORKING: Resident after 7pm? "
-            + yesno(resident_after_7pm)
-            + " / 4h work after 7pm on >=50% occasions, from monitoring? "
-            + yesno(rota.work4h_after7pm_halformore)
-            + "]"
-        )
-        resident = any(s.resident for s in self.daypattern)
-
-        # The flowchart from the BMA's guide [BMA_1]:
-        band = None
-        decisions.append("Complies with ND/WTR rest requirements? "
-                         + yesno(rest_compliant))
-        if not rest_compliant:
-            return ("3", decisions)  # BAND 3
-        decisions.append(">48h of actual work (inc. PC)? "
-                         + yesno(more_than_48h))
-        if more_than_48h:
-            decisions.append("On call rota? " + yesno(on_call_rota))
-            if on_call_rota:
-                decisions.append(
-                    "1:6 or more inc. PC? "
-                    + yesno(one_in_six_or_more_inc_pc)
-                    + " / 1:3 weekends or more? "
-                    + yesno(one_weekend_in_three_or_more)
-                )
-                if one_in_six_or_more_inc_pc or one_weekend_in_three_or_more:
-                    decisions.append("Fulfil criterion R? "
-                                     + yesno(fulfil_criterion_r)
-                                     + criterion_r_reasoning)
-                    if fulfil_criterion_r:
-                        return ("2A", decisions)  # BAND 2A
-                    else:
-                        return ("2B", decisions)  # BAND 2B
-                else:
-                    return ("2B", decisions)  # BAND 2B
-            else:
-                decisions.append(
-                    ">1/3 hours outside 7am-7pm Mon-Fri? "
-                    + yesno(more_than_third_hours_outside_normal)
-                    + " / 1:3 weekends or more? "
-                    + yesno(one_weekend_in_three_or_more)
-                )
-                if (more_than_third_hours_outside_normal
-                        or one_weekend_in_three_or_more):
-                    return ("2A", decisions)  # BAND 2A
-                else:
-                    return ("2B", decisions)  # BAND 2B
-        else:
-            decisions.append("On call rota? " + yesno(on_call_rota))
-            if not on_call_rota:
-                decisions.append(
-                    ">1/3 hours outside 7am-7pm Mon-Fri? "
-                    + yesno(more_than_third_hours_outside_normal)
-                    + " / 1:4 weekends or more? "
-                    + yesno(one_weekend_in_four_or_more)
-                )
-                if (more_than_third_hours_outside_normal
-                        or one_weekend_in_four_or_more):
-                    return ("1A", decisions)  # BAND 1A
-                else:
-                    return ("1B", decisions)  # BAND 1B
-            else:
-                decisions.append(
-                    "1:6 or more inc. PC? "
-                    + yesno(one_in_six_or_more_inc_pc)
-                )
-                if one_in_six_or_more_inc_pc:
-                    return ("1A", decisions)  # BAND 1A
-                else:
-                    decisions.append(
-                        "1:8 or more inc. PC? "
-                        + yesno(one_in_eight_or_more_inc_pc)
-                        + " / 1:4 weekends or more? "
-                        + yesno(one_weekend_in_four_or_more)
-                    )
-                    if (one_in_eight_or_more_inc_pc
-                            or one_weekend_in_four_or_more):
-                        decisions.append("Fulfil criterion R? "
-                                         + yesno(fulfil_criterion_r)
-                                         + criterion_r_reasoning)
-                        if fulfil_criterion_r:
-                            return ("1A", decisions)  # BAND 1A
-                        else:
-                            return ("1B", decisions)  # BAND 1B
-                    else:
-                        decisions.append(
-                            "1:8 without PC or less? "
-                            + yesno(one_in_eight_without_pc_or_less)
-                        )
-                        if not one_in_eight_without_pc_or_less:
-                            return ("1B", decisions)  # BAND 1B
-                        else:
-                            decisions.append(
-                                "Resident (clinically/contractually)? "
-                                + yesno(resident)
-                            )
-                            if resident:
-                                return ("1B", decisions)  # BAND 1B
-                            else:
-                                return ("1C", decisions)  # BAND 1C
-        return (band, decisions)
+        return n
 
 
 # =============================================================================
@@ -1709,7 +1977,6 @@ class Rota(object):
                  prospective_cover=True,
                  prototype_rotation_to_monday_start=0,
                  work4h_after7pm_halformore=True,
-                 hours_per_leave_week=40,
                  doctor_patterns_weekday_based=True,
                  doctor_patterns_start_weekday=0,  # Monday
                  comments=None):
@@ -1730,8 +1997,6 @@ class Rota(object):
             patterns that start on a Wednesday).
         work4h_after7pm_halformore: does monitoring show that the doctors work
             4 hours after 7pm on half or more occasions?
-        hours_per_leave_week: usually 40; the number of hours in a 'base' week,
-            used for leave calculations
         doctor_patterns_weekday_based: if True, the patterns in the doctor
             objects are taken to start on a specific weekday (see
             doctor_patterns_start_weekday); if False, they are assumed to start
@@ -1750,7 +2015,6 @@ class Rota(object):
         self.prototype_rotation_to_monday_start = \
             prototype_rotation_to_monday_start
         self.work4h_after7pm_halformore = work4h_after7pm_halformore
-        self.hours_per_leave_week = hours_per_leave_week
         self.doctor_patterns_weekday_based = doctor_patterns_weekday_based
         self.doctor_patterns_start_weekday = doctor_patterns_start_weekday % 7
         self.comments = [] if comments is None else comments
@@ -1782,12 +2046,12 @@ class Rota(object):
         return (
             "Rota(name={}, shifts={}, doctors={}, nwd_shifts={}, "
             "start_date={}, end_date={}, prospective_cover={}, "
-            "work4h_after7pm_halformore={}, hours_per_leave_week={}, "
+            "work4h_after7pm_halformore={}, "
             "doctor_patterns_weekday_based={}, "
             "doctor_patterns_start_weekday={})".format(
                 repr(self.name), self.shifts, self.doctors, self.nwd_shifts,
                 self.start_date, self.end_date, self.prospective_cover,
-                self.work4h_after7pm_halformore, self.hours_per_leave_week,
+                self.work4h_after7pm_halformore,
                 self.doctor_patterns_weekday_based,
                 self.doctor_patterns_start_weekday,
             )
@@ -1939,6 +2203,7 @@ class Rota(object):
             html += (
                 self.get_html_role_coverage()
                 + self.get_html_nwd_coverage()
+                + self.get_html_shift_counts()
                 + self.get_html_bandings()
             )
         html += self.get_html_footnotes()
@@ -2047,6 +2312,10 @@ class Rota(object):
                 Terms and Conditions of Service: NHS Medical and Dental Staff
                 (England)</a></li>
 
+                <li>[NHS_2] Department of Health (2000)
+                <a href="{nhs_2}">Junior doctors’ hours – monitoring
+                guidance</a></li>
+
                 <li>[RCP_1] RCP London (2006) <a href="{rcp_1}">Designing safer
                 rotas for junior doctors</a></li>
 
@@ -2058,6 +2327,7 @@ class Rota(object):
             <ul>
                 <li>BMA = British Medical Association</li>
                 <li>EWTD = European Working Time Directive</li>
+                <li>FT = full time</th>
                 <li>LTFT = less than full time</li>
                 <li>ND = New Deal</li>
                 <li>WTR = Working Time Regulations</li>
@@ -2082,6 +2352,7 @@ class Rota(object):
             bma_7="http://bma.org.uk/practical-support-at-work/contracts/juniors-contracts/rotas-and-working-patterns/rota-template-and-riddell-calculator",  # noqa
             rcp_1="https://www.rcplondon.ac.uk/sites/default/files/documents/designing_safer_rotasweb.pdf",  # noqa
             nhs_1="http://www.nhsemployers.org/~/media/Employers/Documents/Pay%20and%20reward/Terms_and_Conditions_of_Service_NHS_Medical_and_Dental_Staff_300813_bt.pdf",  # noqa
+            nhs_2="http://www.dhsspsni.gov.uk/de/print/jdcmonitoring.pdf",
         )
 
     def get_html_rota_settings(self):
@@ -2102,15 +2373,10 @@ class Rota(object):
                         occasions</td>
                     <td>{work4h_after7pm_halformore}</td>
                 </tr>
-                <tr>
-                    <td>Hours per leave week (... not covered by others)</td>
-                    <td>{hours_per_leave_week}</td>
-                </tr>
             </table>
         """.format(
             prospective_cover=yesno(self.prospective_cover),
             work4h_after7pm_halformore=yesno(self.work4h_after7pm_halformore),
-            hours_per_leave_week=self.hours_per_leave_week,
         )
 
     def get_html_shifts(self):
@@ -2217,6 +2483,7 @@ class Rota(object):
         args = ((self, role) for role in roles)
 
         # Non-parallel version for debugging:
+        # logger.warning("Using non-parallel role coverage calc for debugging")
         # for result in map(pfunc_role_coverage, args):
         #     resultlist.append(result)
 
@@ -2271,6 +2538,49 @@ class Rota(object):
         html += "</table>"
         return html
 
+    def get_html_shift_counts(self):
+        """HTML for shift counts per doctor, to aid checking."""
+        logger.info("- shift counts")
+        wholespan = Interval.dayspan(self.start_date, self.end_date)
+        html = """
+            <h2>Shift counts by doctor</h2>
+            <p>Only working shifts are shown. Bank Holidays are taken account
+            of, i.e. if a NWD shift falls on a Bank Holiday, it doesn’t count
+            as work here.</p>
+            <table>
+                <tr>
+                    <th>Doctor</th>
+        """
+        zero_shiftcounts = OrderedDict()
+        for s in self.shifts:
+            if not s.work:
+                continue
+            zero_shiftcounts[s.name] = 0
+            html += "<th>{}</th>".format(s.name)
+        html += "</tr>"
+        for d in self.doctors:
+            shiftcounts = zero_shiftcounts.copy()
+            for dayoffset in range(self.n_days):
+                date = self.start_date + datetime.timedelta(days=dayoffset)
+                s = d.get_shift_for_day(dayoffset)
+                if not s.work:
+                    continue
+                if s.get_work_interval(date,
+                                       ignore_bank_holidays=False) is None:
+                    continue
+                shiftcounts[s.name] += 1
+            html += """
+                <tr>
+                    <td><b>{docname}</b></td>
+            """.format(docname=d.name)
+            for shiftname, count in shiftcounts.items():
+                html += "<td>{}</td>".format(count)
+            html += """
+                </tr>
+            """
+        html += "</table>"
+        return html
+
     def get_html_bandings(self):
         """HTML for doctor/banding analysis."""
         logger.info("- bandings")
@@ -2278,11 +2588,17 @@ class Rota(object):
             <h2>Bandings</h2>
             <table>
                 <tr>
+                    <!-- Passed in -->
                     <th>Doctor</th>
                     <th>OOH person-defined roles</th>
+                    <th>LTFT?</th>
+                    <th>Leave weeks/year</th>
+                    <th>Hours per leave week (... not covered by others)</th>
+                    <!-- Calculated -->
                     <th>Hours/week (actual, ignoring leave/BHs)</th>
                     <th>Hours/week (including prospective cover)</th>
-                    <th>Leave weeks/year</th>
+                    <th>LTFT basic salary band</th>
+                    <th>Basic salary: fraction of FT equiv.</th>
                     <th>Fraction weekends worked</th>
                     <th>Fraction hours OOH</th>
                     <th>Max continuous hours</th>
@@ -2302,6 +2618,7 @@ class Rota(object):
         args = ((self, doc) for doc in self.doctors)
 
         # Non-parallel version for debugging:
+        # logger.warning("Using non-parallel banding calcs for debugging")
         # for result in map(pfunc_doctor_banding, args):
         #     banding_info_list.append(result)
 
@@ -2313,38 +2630,20 @@ class Rota(object):
 
         for i in range(len(self.doctors)):
             d = self.doctors[i]
-            logger.debug("  ... banding calcs part 2 for {}".format(d.name))
-            # banding_info = d.banding_info(self)
-            banding_info = banding_info_list[i]
-
-            (
-                hours_per_week,
-                hours_per_week_inc_pc,
-                fraction_weekends_worked,
-                fraction_hours_ooh,
-                max_continuous_hours,
-                max_continuous_hours_interval,
-                min_rest_between_duties_h,
-                min_rest_between_duties_interval,
-                max_continuous_duty_days,
-                max_continuous_duty_interval,
-                off_24h_every_7d,
-                off_24h_every_7d_ffi,
-                off_48h_every_14d,
-                off_48h_every_14d_ffi,
-                one_48h_and_one_62h_off_every_21d,
-                one_48h_and_one_62h_off_every_21d_ffi,
-                one_48h_and_one_62h_off_every_28d,
-                one_48h_and_one_62h_off_every_28d_ffi,
-            ) = banding_info
-            (banding, decisions) = d.get_banding(self, banding_info)
+            bi = banding_info_list[i]
             html += """
                 <tr>
-                    <td>{name}</td>
-                    <td>{ooh_roles}</td>
+                    <!-- Passed in -->
+                    <td><b>{name}</b></td>
+                    <td><b>{ooh_roles}</b></td>
+                    <td><b>{ltft}</b></td>
+                    <td><b>{leave_weeks_per_year}</b></td>
+                    <td><b>{hours_per_leave_week}</b></td>
+                    <!-- Calculated -->
                     <td>{hours_per_week}</td>
                     <td>{hours_per_week_inc_pc}</td>
-                    <td>{leave_weeks_per_year}</td>
+                    <td>{ltft_basic_salary_band}</td>
+                    <td>{basic_salary_fraction}</td>
                     <td>{fraction_weekends_worked}</td>
                     <td>{fraction_hours_ooh}</td>
                     <td>{max_continuous_hours}</td>
@@ -2361,25 +2660,30 @@ class Rota(object):
             """.format(
                 name=d.name,
                 ooh_roles=", ".join(d.ooh_roles),
-                hours_per_week=number_to_dp(hours_per_week, DP),
-                hours_per_week_inc_pc=number_to_dp(hours_per_week_inc_pc, DP),
+                ltft=yesno(d.ltft),
+                hours_per_week=number_to_dp(bi.hours_per_week, DP),
+                hours_per_week_inc_pc=number_to_dp(
+                    bi.hours_per_week_inc_pc, DP),
+                ltft_basic_salary_band=bi.ltft_basic_salary_band,
+                basic_salary_fraction=bi.basic_salary_fraction,
                 leave_weeks_per_year=d.leave_weeks_per_year,
-                fraction_weekends_worked=number_to_dp(fraction_weekends_worked,
-                                                      DP),
-                fraction_hours_ooh=number_to_dp(fraction_hours_ooh, DP),
-                max_continuous_hours=number_to_dp(max_continuous_hours, DP),
+                hours_per_leave_week=d.hours_per_leave_week,
+                fraction_weekends_worked=number_to_dp(
+                    bi.fraction_weekends_worked, DP),
+                fraction_hours_ooh=number_to_dp(bi.fraction_hours_ooh, DP),
+                max_continuous_hours=number_to_dp(bi.max_continuous_hours, DP),
                 min_rest_between_duties_h=number_to_dp(
-                    min_rest_between_duties_h, DP),
-                max_continuous_duty_days=max_continuous_duty_days,
-                off_24h_every_7d=yesno(off_24h_every_7d),
-                off_48h_every_14d=yesno(off_48h_every_14d),
+                    bi.min_rest_between_duties_h, DP),
+                max_continuous_duty_days=bi.max_continuous_duty_days,
+                off_24h_every_7d=yesno(bi.off_24h_every_7d),
+                off_48h_every_14d=yesno(bi.off_48h_every_14d),
                 one_48h_and_one_62h_off_every_21d=yesno(
-                    one_48h_and_one_62h_off_every_21d),
+                    bi.one_48h_and_one_62h_off_every_21d),
                 one_48h_and_one_62h_off_every_28d=yesno(
-                    one_48h_and_one_62h_off_every_28d),
-                banding=banding,
-                supplement=SUPPLEMENT[banding],
-                working=" → ".join(decisions),
+                    bi.one_48h_and_one_62h_off_every_28d),
+                banding=bi.banding,
+                supplement=SUPPLEMENT[bi.banding],
+                working=" → ".join(bi.decisions),
             )
         html += "</table>"
         return html
@@ -2436,7 +2740,7 @@ def test_prospective_cover():
         nwd, nwd, nwd, nwd, long, long, long,
         nwd, nwd, long, nwd, nwd, nwd, nwd,
         nwd, long, nwd, nwd, nwd, nwd, nwd,
-    ], leave_weeks_per_year=6.5)
+    ], leave_weeks_per_year=6.5, hours_per_leave_week=40)
     doctors = base_doc.make_group("doc_")
 
     # Rota
@@ -2446,7 +2750,6 @@ def test_prospective_cover():
         "Test prospective cover calculations", shifts, doctors,
         start_date=start_monday,
         end_date=None,
-        hours_per_leave_week=40,
         nwd_shifts=[nwd],
         prototypes=[base_doc],
         comments=[
@@ -2735,6 +3038,243 @@ def cpft_actual_aug2015_north():
             "<b><i>Band 2 rotas are not EWTD compliant.</i></b>",
             "<b>Supplement cost:</b> 12 × 0.5 = 6 SHOs + 6 × 0.5 = 3 SpRs, or "
             "approx. £305,000.",
+        ],
+    )
+
+
+def cpft_actual_aug2015_south_ltft_1():
+    # Shifts
+    # ... colours to match the original
+    nwd = Shift(
+        "Normal_working_day", "nwd", datetime.time(9), 8, nwd_only=True,
+        resident=True, rgb=(217, 150, 148))
+    late1 = Shift(
+        "Late_1", "L1", datetime.time(9), 12.5,
+        roles=["Late", "Late_1"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(142, 180, 227))
+    late2 = Shift(
+        "Late_2", "L2", datetime.time(9), 12.5,
+        roles=["Late", "Late_2"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(0, 176, 240))
+    late3 = Shift(
+        "Late_3", "L3", datetime.time(9), 12.5,
+        roles=["Late", "Late_3"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(23, 55, 94))
+    night1 = Shift(
+        "Night_1", "N1", datetime.time(21, 15), 12,
+        roles=["Night", "Night_1"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(146, 208, 80))
+    night2 = Shift(
+        "Night_2", "N2", datetime.time(21, 15), 12,
+        roles=["Night", "Night_2"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(79, 98, 40))
+    off = Shift(
+        "Off", "OFF", datetime.time(9, 15), 7.75, work=False)
+    shifts = [nwd, late1, late2, late3, night1, night2, off]
+
+    # Doctors
+    # normal week: Tue, Wed, Thu
+    # Tue off after a block of 3 nights (but full-timers get that anyway)
+    # Thu off after a block of 3 nights (but full-timers get that anyway)
+    # no days off before/after block of 4 nights (as those are Mon/Fri)
+    e = Doctor("E", [
+        off, nwd, nwd, nwd, late1, late1, late1,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, off, night2, night2, night2,
+        off, off, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, late2, off, off, off,  # Mon-Wed: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, late3, late3, late3,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, late1, off, off, off,  # Mon-Wed: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, off, off, off, off,  # Fri-Sun: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        late3, late3, nwd, nwd, off, off, off,  # Wed-Thu: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        night2, night2, night2, night2, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,  # Fri-Sun: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,  # Mon-Thu: not on call
+        off, nwd, nwd, nwd, off, off, off,
+    ], leave_weeks_per_year=6, hours_per_leave_week=24, ltft=True)
+    k = Doctor("K", [
+        # normal week: Tue, Wed, Thu
+        off, nwd, nwd, nwd, off, off, off,  # Fri-Sun: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,  # Fri-Sun: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        late2, late2, late2, nwd, off, off, off,  # Thu: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,  # Fri-Sun: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        late1, late1, late1, nwd, off, off, off,  # Thu: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, off, night1, night1, night1,
+        off, off, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, late3, late3, off, off, off,  # Mon-Tue: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,  # Mon-Thu: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, late1, late1, late1,
+        off, nwd, nwd, nwd, off, off, off,
+        night1, night1, night1, night1, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+    ], leave_weeks_per_year=6, hours_per_leave_week=24, ltft=True)
+    doctors = [e, k]
+
+    # Rota
+    return Rota(
+        "CPFT Aug 2015 South, LTFT component", shifts, doctors,
+        start_date=datetime.date(2015, 8, 5),  # start on a Wednesday
+        nwd_shifts=[nwd],
+        comments=[
+            "<b>Author:</b> CPFT Medical Staffing, Aug 2015.",
+            "Two LTFT trainees job-sharing. They are collectively the “25_SpR”"
+            " role from the cpft_actual_aug2015_south rota.",
+            "Calculated banding: F7 (×0.7) base and FB (×1.4) supplement "
+            "= 0.98 FT base salary."
+        ],
+    )
+
+
+def cpft_actual_aug2015_south_ltft():
+    # Shifts
+    # ... colours to match the original
+    nwd = Shift(
+        "Normal_working_day", "nwd", datetime.time(9), 8, nwd_only=True,
+        resident=True, rgb=(217, 150, 148))
+    late1 = Shift(
+        "Late_1", "L1", datetime.time(9), 12.5,
+        roles=["Late", "Late_1"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(142, 180, 227))
+    late2 = Shift(
+        "Late_2", "L2", datetime.time(9), 12.5,
+        roles=["Late", "Late_2"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(0, 176, 240))
+    late3 = Shift(
+        "Late_3", "L3", datetime.time(9), 12.5,
+        roles=["Late", "Late_3"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(23, 55, 94))
+    mf_late1 = Shift(
+        "MonFri_Late_1", "MF_L1", datetime.time(17), 4.5,
+        roles=["Late", "Late_1"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(142, 180, 227))
+    mf_late2 = Shift(
+        "MonFri_Late_2", "MF_L2", datetime.time(17), 4.5,
+        roles=["Late", "Late_2"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(0, 176, 240))
+    mf_late3 = Shift(
+        "MonFri_Late_3", "MF_L3", datetime.time(17), 4.5,
+        roles=["Late", "Late_3"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(23, 55, 94))
+    night1 = Shift(
+        "Night_1", "N1", datetime.time(21, 15), 12,
+        roles=["Night", "Night_1"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(146, 208, 80))
+    night2 = Shift(
+        "Night_2", "N2", datetime.time(21, 15), 12,
+        roles=["Night", "Night_2"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=(79, 98, 40))
+    off = Shift(
+        "Off", "OFF", datetime.time(9, 15), 7.75, work=False)
+    shifts = [nwd,
+              late1, mf_late1,
+              late2, mf_late2,
+              late3, mf_late3,
+              night1, night2, off]
+
+    # Doctors
+    # normal week: Tue, Wed, Thu
+    # Tue off after a block of 3 nights (but full-timers get that anyway)
+    # Thu off after a block of 3 nights (but full-timers get that anyway)
+    # no days off before/after block of 4 nights (as those are Mon/Fri)
+    e = Doctor("E", [
+        off, nwd, nwd, nwd, mf_late1, late1, late1,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, off, night2, night2, night2,
+        off, off, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, late2, off, off, off,  # Mon-Wed: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, mf_late3, late3, late3,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, late1, off, off, off,  # Mon-Wed: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, off, off, off, off,  # Fri-Sun: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        mf_late3, late3, nwd, nwd, off, off, off,  # Wed-Thu: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        night2, night2, night2, night2, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,  # Fri-Sun: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,  # Mon-Thu: not on call
+        off, nwd, nwd, nwd, off, off, off,
+    ], leave_weeks_per_year=6, hours_per_leave_week=24, ltft=True)
+    k = Doctor("K", [
+        # normal week: Tue, Wed, Thu
+        off, nwd, nwd, nwd, off, off, off,  # Fri-Sun: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,  # Fri-Sun: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        mf_late2, late2, late2, nwd, off, off, off,  # Thu: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,  # Fri-Sun: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        mf_late1, late1, late1, nwd, off, off, off,  # Thu: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, off, night1, night1, night1,
+        off, off, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, late3, late3, off, off, off,  # Mon-Tue: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,  # Mon-Thu: not on call
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+        off, nwd, nwd, nwd, mf_late1, late1, late1,
+        off, nwd, nwd, nwd, off, off, off,
+        night1, night1, night1, night1, off, off, off,
+        off, nwd, nwd, nwd, off, off, off,
+    ], leave_weeks_per_year=6, hours_per_leave_week=24, ltft=True)
+    doctors = [e, k]
+
+    # Rota
+    return Rota(
+        "CPFT Aug 2015 South, LTFT component", shifts, doctors,
+        start_date=datetime.date(2015, 8, 5),  # start on a Wednesday
+        nwd_shifts=[nwd],
+        comments=[
+            "<b>Author:</b> CPFT Medical Staffing, Aug 2015.",
+            "Two LTFT trainees job-sharing. They are collectively the “25_SpR”"
+            " role from the cpft_actual_aug2015_south rota.",
+            "Normal working days Tue/Wed/Fri. Modification of Late shifts "
+            "to remove the normal-working-day component on Mon/Fri (or, in "
+            "practice, possibly equivalent time off).",
+            "Calculated banding: F7 (×0.7) base plus FB (×1.4) supplement "
+            "= 0.98 FT base salary."
         ],
     )
 
@@ -3418,6 +3958,7 @@ ROTA_GENERATORS = OrderedDict([
     ('test_prospective_cover', test_prospective_cover),
     ('cpft_actual_aug2015_south', cpft_actual_aug2015_south),
     ('cpft_actual_aug2015_north', cpft_actual_aug2015_north),
+    ('cpft_actual_aug2015_south_ltft', cpft_actual_aug2015_south_ltft),
     ('cpft_draft_1_south', cpft_draft_1_south),
     ('cpft_draft_2_combined', cpft_draft_2_combined),
     ('cpft_draft_3_split', cpft_draft_3_split),
