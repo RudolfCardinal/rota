@@ -62,10 +62,10 @@ Tips
     - The program produces HTML output; use a web browser to view the rota
       files generated.
 
-    - Use the '-d' or '--daynums' option to add day numbers (as well as dates)
+    - Use the '-n' or '--daynums' option to add day numbers (as well as dates)
       to the rota. This can help when comparing existing/new rotas.
 
-    - Use the '-s' or '--skipanalytics' option to generate a rota very quickly
+    - Use the '-c' or '--nocalc' option to generate a rota very quickly
       but without the analysis. Iterate through (change code, regenerate,
-      check) quickly until you're satisfied; then remove the '-s' option to
-      perform the full analyses.
+      check) quickly until you're satisfied; then remove this option to perform
+      the full analyses.

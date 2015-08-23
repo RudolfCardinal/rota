@@ -2188,10 +2188,8 @@ def pfunc_doctor_banding(args):
     concurrent.futures system (it seems), and can only pass a single parameter,
     so we pass the object and the function argument to this (as a single
     list)."""
-    # logger.debug("args={}".format(args))
     rota = args[0]
     doc = args[1]
-    # logger.debug("rota={}, doc={}".format(rota, doc))
     return doc.banding_info(rota)
 
 
@@ -2269,12 +2267,7 @@ class Rota(object):
         self.n_days = (self.end_date - self.start_date).days + 1
         # Rotate the patterns? If so, make copies.
         if doctor_patterns_weekday_based:
-            logger.debug("1")
-            logger.debug(doctor_patterns_start_weekday)
-            logger.debug(start_date)
-            logger.debug(start_date.weekday())
             if doctor_patterns_start_weekday != start_date.weekday():
-                logger.debug("2")
                 rotation = doctor_patterns_start_weekday - start_date.weekday()
                 logger.debug("rotating all patterns by {}".format(rotation))
                 self.doctors = [
@@ -2358,8 +2351,8 @@ class Rota(object):
         times.sort()
         return times
 
-    def print_html(self, filename, daynums=False, skipanalytics=False,
-                   noprototypes=False):
+    def print_html(self, filename, daynums=False, analyses=True,
+                   prototypes=True, diary=True):
         """Write the rota summary/analysis to an HTML file."""
         logger.info("Writing HTML for rota {} to {}...".format(self.name,
                                                                filename))
@@ -2381,8 +2374,10 @@ class Rota(object):
                     </html>
                 """.format(title=webify(self.name),
                            css=self.get_css(),
-                           body=self.get_html_body(daynums, skipanalytics,
-                                                   noprototypes)),
+                           body=self.get_html_body(daynums=daynums,
+                                                   analyses=analyses,
+                                                   prototypes=prototypes,
+                                                   diary=diary)),
                 file=f
             )
         logger.info("HTML written.")
@@ -2431,19 +2426,20 @@ class Rota(object):
             css += s.get_css_definition()
         return css
 
-    def get_html_body(self, daynums=False, skipanalytics=False,
-                      noprototypes=False):
+    def get_html_body(self, daynums=False, analyses=True,
+                      prototypes=True, diary=True):
         """Returns the main part of the HTML display."""
         html = (
             "<h1>{}</h1>".format(webify(self.name))
             + self.get_html_comments()
             + self.get_html_rota_settings()
             + self.get_html_shifts()
-            + self.get_html_rota_pattern(daynums)
         )
-        if not noprototypes:
+        if diary:
+            html += self.get_html_rota_pattern(daynums)
+        if prototypes:
             html += self.get_html_prototypes()
-        if not skipanalytics:
+        if analyses:
             html += (
                 self.get_html_role_coverage()
                 + self.get_html_nwd_coverage()
@@ -2497,6 +2493,11 @@ class Rota(object):
                 doctors</i>) explanation that a rota involving 7 night shifts
                 (each 21:00–09:30) is legitimate (meaning New Deal and EWTD
                 compliant) — albeit heavily discouraged on safety grounds.</li>
+                
+                <li>“The allocation of a post to a banding is established by
+                monitoring of the actual work carried out by doctors in that
+                post not by any theoretical or paper exercise or calculation
+                (which can only provide an indicative banding).” [BMA_8]</li>
 
                 <li>Full-time banding supplements are as follows.
                 Band 3: 100%.
@@ -2559,6 +2560,10 @@ class Rota(object):
                 patterns → <a href="{bma_7}">Riddell formula
                 calculator</a></li>
 
+                <li>[BMA_8] <a href="{bma}">BMA</a> → Home → Practical support
+                at work → Pays, fees &amp; allowances → Pay banding →
+                <a href="{bma_8}">How does banding work?</a></li>
+
                 <li>[NHS_1] <a href="nhs_1">NHS Employers (2002–2013)
                 Terms and Conditions of Service: NHS Medical and Dental Staff
                 (England)</a></li>
@@ -2603,6 +2608,7 @@ class Rota(object):
             bma_5="https://bma.org.uk/-/media/files/pdfs/practical%20advice%20at%20work/your%20rights/pay%20fees%20allowances/finalcountdown_ewtd.pdf",  # noqa
             bma_6="http://bma.org.uk/practical-support-at-work/pay-fees-allowances/pay-scales/juniors-england",  # noqa
             bma_7="http://bma.org.uk/practical-support-at-work/contracts/juniors-contracts/rotas-and-working-patterns/rota-template-and-riddell-calculator",  # noqa
+            bma_8="https://bma.org.uk/practical-support-at-work/pay-fees-allowances/pay-banding/how-does-it-work",  # noqa
             rcp_1="https://www.rcplondon.ac.uk/sites/default/files/documents/designing_safer_rotasweb.pdf",  # noqa
             nhs_1="http://www.nhsemployers.org/~/media/Employers/Documents/Pay%20and%20reward/Terms_and_Conditions_of_Service_NHS_Medical_and_Dental_Staff_300813_bt.pdf",  # noqa
             nhs_2="http://www.dhsspsni.gov.uk/de/print/jdcmonitoring.pdf",
@@ -4105,15 +4111,16 @@ ROTA_GENERATORS = OrderedDict([
 ])
 
 
-def process_rota(rotaname, daynums=False, skipanalytics=False,
-                 noprototypes=False):
+def process_rota(rotaname, daynums=False, analyses=True,
+                 prototypes=True, diary=True):
     """Sends a rota to an HTML file."""
     if rotaname not in ROTA_GENERATORS:
         raise ValueError("Invalid rota: " + rotaname)
     fn = ROTA_GENERATORS[rotaname]
     rota = fn()
     filename = rotaname + ".html"
-    rota.print_html(filename, daynums, skipanalytics, noprototypes)
+    rota.print_html(filename, daynums=daynums, analyses=analyses,
+                    prototypes=prototypes, diary=diary)
 
 
 # =============================================================================
@@ -4137,27 +4144,36 @@ Version {}
         "-a", "--all", action="store_true",
         help="Process all known rotas")
     parser.add_argument(
-        "-d", "--daynums", action="store_true",
+        "-c", "--nocalc", action="store_true",
+        help="Skip calculations/analyses")
+    parser.add_argument(
+        "-d", "--nodiary", action="store_true",
+        help="Skip main diary/calendar pattern")
+    parser.add_argument(
+        "-n", "--daynums", action="store_true",
         help="Show day numbers as well as dates")
     parser.add_argument(
-        "-s", "--skipanalytics", action="store_true",
-        help="Skip analyses")
-    parser.add_argument(
-        "-n", "--noprototypes", action="store_true",
-        help="Skip prototype patterns")
+        "-p", "--noprototypes", action="store_true",
+        help="Skip doctor prototype patterns")
     args = parser.parse_args()
 
     if args.all:
         for rotaname in ROTA_GENERATORS.keys():
-            process_rota(rotaname, args.daynums, args.skipanalytics,
-                         args.noprototypes)
+            process_rota(rotaname,
+                         daynums=args.daynums,
+                         analyses=not args.nocalc,
+                         prototypes=not args.noprototypes,
+                         diary=not args.nodiary)
     else:
         if not args.rota:
             parser.print_help()
             sys.exit(1)
         for rotaname in args.rota:
-            process_rota(rotaname, args.daynums, args.skipanalytics,
-                         args.noprototypes)
+            process_rota(rotaname,
+                         daynums=args.daynums,
+                         analyses=not args.nocalc,
+                         prototypes=not args.noprototypes,
+                         diary=not args.nodiary)
 
 
 # =============================================================================
