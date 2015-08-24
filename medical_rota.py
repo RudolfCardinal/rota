@@ -58,7 +58,7 @@ Version history (see VERSION below)
     - New BandingInfo() class.
     - Shift count display by doctor.
     - Shows full working.
-    
+
     1.4 (2015-08-24)
     - Bugfix: working for "Weekends ≥1:4?" was displaying the result for
       "Weekends ≥1:3?" (though corresponding banding calculation was correct).
@@ -2496,7 +2496,7 @@ class Rota(object):
                 doctors</i>) explanation that a rota involving 7 night shifts
                 (each 21:00–09:30) is legitimate (meaning New Deal and EWTD
                 compliant) — albeit heavily discouraged on safety grounds.</li>
-                
+
                 <li>“The allocation of a post to a banding is established by
                 monitoring of the actual work carried out by doctors in that
                 post not by any theoretical or paper exercise or calculation
