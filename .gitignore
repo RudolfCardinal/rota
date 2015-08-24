@@ -1,5 +1,6 @@
 actual_rotas/
 bma_info/
+cached_output/
 nhs_info/
 rcp_info/
 __pycache__/

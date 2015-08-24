@@ -300,10 +300,13 @@ def webify(v, preserve_newlines=True):
     return cgi.escape(v).replace("\n", nl).replace("\\n", nl)
 
 
-def formatdt(date):
+def formatdt(date, include_time=True):
     """Formats a date to ISO-8601 basic format, to minute accuracy with no
-    timezone."""
-    return date.strftime("%Y-%m-%dT%H:%M")
+    timezone (or, if include_time is False, omit the time)."""
+    if include_time:
+        return date.strftime("%Y-%m-%dT%H:%M")
+    else:
+        return date.strftime("%Y-%m-%d")
 
 
 # =============================================================================
@@ -2385,9 +2388,11 @@ class Rota(object):
 
     def get_css(self):
         """Returns the CSS for the rota display."""
+        # http://kyleschaeffer.com/development/css-font-size-em-vs-px-vs-pt-vs/
         css = """
             body {
                 font-family: "Times New Roman", Georgia, Serif;
+                font-size: 60%;
             }
             h1, h2, h3 {
                 font-family: Arial, Helvetica, sans-serif;
@@ -2429,7 +2434,7 @@ class Rota(object):
 
     def get_html_body(self, daynums=False, analyses=True,
                       prototypes=True, diary=True, working=True,
-                      shiftcounts=True):
+                      shiftcounts=True, footnotes=True):
         """Returns the main part of the HTML display."""
         html = (
             "<h1>{}</h1>".format(webify(self.name))
@@ -2449,7 +2454,8 @@ class Rota(object):
             if shiftcounts:
                 html += self.get_html_shift_counts()
             html += self.get_html_bandings(working=working)
-        html += self.get_html_footnotes()
+        if footnotes:
+            html += self.get_html_footnotes()
         return html
 
     def get_html_comments(self):
@@ -2627,6 +2633,14 @@ class Rota(object):
                     <th>Value</th>
                 </tr>
                 <tr>
+                    <td>Start date</td>
+                    <td>{start_date}</td>
+                </tr>
+                <tr>
+                    <td>End date</td>
+                    <td>{end_date}</td>
+                </tr>
+                <tr>
                     <td>Prospective cover</td>
                     <td>{prospective_cover}</td>
                 </tr>
@@ -2637,6 +2651,8 @@ class Rota(object):
                 </tr>
             </table>
         """.format(
+            start_date=formatdt(self.start_date, include_time=False),
+            end_date=formatdt(self.end_date, include_time=False),
             prospective_cover=yesno(self.prospective_cover),
             work4h_after7pm_halformore=yesno(self.work4h_after7pm_halformore),
         )
@@ -4257,8 +4273,7 @@ def cpft_draft_5_split():
     doctors = north_shos + north_sprs + south_sprs + south_shos
 
     return Rota(
-        "CPFT draft 5, split North/South SpRs in evenings, combined "
-        "North/South SpRs at night", shifts, doctors,
+        "CPFT draft 5, split North/South SpRs throughout", shifts, doctors,
         start_date=datetime.date(2015, 8, 5),  # Wednesday
         nwd_shifts=[nwd],
         prototypes=[south_base_sho, north_base_sho,
@@ -4321,7 +4336,10 @@ def main():
     """Command-line entry point function."""
     description = """
 Medical rota checker. By Rudolf Cardinal (rudolf@pobox.com), Aug 2015.
-Version {}
+Version {}.
+Tips:
+  Run with the '-a' option alone to do everything for all rotas.
+  Append '-d -f -s -w' for a short printable version, for comparing rotas.
 """.format(VERSION)
     parser = argparse.ArgumentParser(
         description=description,
@@ -4340,8 +4358,11 @@ Version {}
         "-d", "--nodiary", action="store_true",
         help="Skip main diary/calendar pattern")
     parser.add_argument(
-        "-n", "--daynums", action="store_true",
-        help="Show day numbers as well as dates")
+        "-f", "--nofootnotes", action="store_true",
+        help="Skip footnotes")
+    parser.add_argument(
+        "-n", "--nodaynums", action="store_true",
+        help="Don't show day numbers as well as dates")
     parser.add_argument(
         "-p", "--noprototypes", action="store_true",
         help="Skip doctor prototype patterns")
@@ -4354,12 +4375,13 @@ Version {}
     args = parser.parse_args()
 
     kwargs = {  # see get_html_body
-        "daynums": args.daynums,
         "analyses": not args.nocalc,
-        "prototypes": not args.noprototypes,
+        "daynums": not args.nodaynums,
         "diary": not args.nodiary,
-        "working": not args.noworking,
+        "footnotes": not args.nofootnotes,
+        "prototypes": not args.noprototypes,
         "shiftcounts": not args.noshiftcounts,
+        "working": not args.noworking,
     }
     if args.all:
         for rotaname in ROTA_GENERATORS.keys():
