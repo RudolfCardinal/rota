@@ -58,13 +58,18 @@ Version history (see VERSION below)
     - New BandingInfo() class.
     - Shift count display by doctor.
     - Shows full working.
+    
+    1.4 (2015-08-24)
+    - Bugfix: working for "Weekends ≥1:4?" was displaying the result for
+      "Weekends ≥1:3?" (though corresponding banding calculation was correct).
+    - Brief summary of bandings, as well as full version.
 """
 
 # =============================================================================
 # Version
 # =============================================================================
 
-VERSION = 1.3
+VERSION = 1.4
 
 # =============================================================================
 # Imports
@@ -1552,12 +1557,12 @@ class BandingInfo(object):
             Any work outside 8am-7pm Mon-Fri?
                 <b>{any_outside_8am7pm_weekdays}</b>.
 
-            Weekends worked: <b>{weekends_worked}</b>
+            Weekends worked: <b>{weekends_worked}</b>.
             Fraction of weekends worked:
                 <b>{fraction_weekends_worked}</b>
                 (1:<b>{recip_fraction_weekends_worked}</b>).
             Weekends ≥1:3? <b>{one_weekend_in_three_or_more}</b>.
-            Weekends ≥1:4? <b>{one_weekend_in_three_or_more}</b>.
+            Weekends ≥1:4? <b>{one_weekend_in_four_or_more}</b>.
             Weekends ≥1:6.5? <b>{one_weekend_in_sixhalf_or_more}</b>.
 
             <i>ON CALL.</i>
@@ -2351,8 +2356,7 @@ class Rota(object):
         times.sort()
         return times
 
-    def print_html(self, filename, daynums=False, analyses=True,
-                   prototypes=True, diary=True):
+    def print_html(self, filename, **kwargs):
         """Write the rota summary/analysis to an HTML file."""
         logger.info("Writing HTML for rota {} to {}...".format(self.name,
                                                                filename))
@@ -2374,10 +2378,7 @@ class Rota(object):
                     </html>
                 """.format(title=webify(self.name),
                            css=self.get_css(),
-                           body=self.get_html_body(daynums=daynums,
-                                                   analyses=analyses,
-                                                   prototypes=prototypes,
-                                                   diary=diary)),
+                           body=self.get_html_body(**kwargs)),
                 file=f
             )
         logger.info("HTML written.")
@@ -2427,7 +2428,8 @@ class Rota(object):
         return css
 
     def get_html_body(self, daynums=False, analyses=True,
-                      prototypes=True, diary=True):
+                      prototypes=True, diary=True, working=True,
+                      shiftcounts=True):
         """Returns the main part of the HTML display."""
         html = (
             "<h1>{}</h1>".format(webify(self.name))
@@ -2443,9 +2445,10 @@ class Rota(object):
             html += (
                 self.get_html_role_coverage()
                 + self.get_html_nwd_coverage()
-                + self.get_html_shift_counts()
-                + self.get_html_bandings()
             )
+            if shiftcounts:
+                html += self.get_html_shift_counts()
+            html += self.get_html_bandings(working=working)
         html += self.get_html_footnotes()
         return html
 
@@ -2585,7 +2588,7 @@ class Rota(object):
                 <li>BMA = British Medical Association</li>
                 <li>EWTD = European Working Time Directive</li>
                 <li>FT = full time</th>
-                <li>LTFT = less than full time</li>
+                <li>LTFT = less than full time (part time)</li>
                 <li>ND = New Deal</li>
                 <li>OOH = out of (normal working) hours</li>
                 <li>WTR = Working Time Regulations</li>
@@ -2845,31 +2848,11 @@ class Rota(object):
         html += "</table>"
         return html
 
-    def get_html_bandings(self):
+    def get_html_bandings(self, working=True):
         """HTML for doctor/banding analysis."""
         logger.info("- bandings")
-        html = """
-            <h2>Bandings</h2>
-            <table>
-                <tr>
-                    <!-- Supplied -->
-                    <th>Doctor</th>
-                    <th class="supplied">OOH person-defined roles</th>
-                    <th class="supplied">LTFT?</th>
-                    <th class="supplied">Leave weeks/year</th>
-                    <th class="supplied">Hours per leave week (... not covered
-                        by others)</th>
-
-                    <!-- Calculated -->
-                    <th>Hours/week (inc. PC)</th>
-                    <th>LTFT basic salary band</th>
-                    <th>Basic salary: fraction of FT equiv.</th>
-                    <th>Banding</th>
-                    <th>Supplement</th>
-                    <th>Working (banding flowchart)</th>
-                    <th>Calculations (not all will be relevant)</th>
-                </tr>
-        """
+        brieftable = ""
+        fulltable = ""
 
         banding_info_list = []
         args = ((self, doc) for doc in self.doctors)
@@ -2888,7 +2871,7 @@ class Rota(object):
         for i in range(len(self.doctors)):
             d = self.doctors[i]
             bi = banding_info_list[i]
-            html += """
+            common = """
                 <tr>
                     <!-- Supplied -->
                     <td><b>{name}</b></td>
@@ -2903,9 +2886,6 @@ class Rota(object):
                     <td>{basic_salary_fraction}</td>
                     <td>{banding}</td>
                     <td>{supplement}</td>
-                    <td>{working}</td>
-                    <td>{banding_info}</td>
-                </tr>
             """.format(
                 name=webify(d.name),
                 ooh_roles=", ".join([webify(x) for x in d.ooh_roles]),
@@ -2919,10 +2899,58 @@ class Rota(object):
                 basic_salary_fraction=bi.basic_salary_fraction,
                 banding=bi.banding,
                 supplement=SUPPLEMENT[bi.banding],
+            )
+            brieftable += common + "</tr>"
+            fulltable += common + """
+                    <td>{working}</td>
+                    <td>{banding_info}</td>
+                </tr>
+            """.format(
                 working=" → ".join([webify(x) for x in bi.decisions]),
                 banding_info=str(bi),
             )
-        html += "</table>"
+
+        common_table_start = """
+            <table>
+                <tr>
+                    <!-- Supplied -->
+                    <th>Doctor</th>
+                    <th class="supplied">OOH person-defined roles</th>
+                    <th class="supplied">LTFT?</th>
+                    <th class="supplied">Leave weeks/year</th>
+                    <th class="supplied">Hours per leave week (... not covered
+                        by others)</th>
+
+                    <!-- Calculated -->
+                    <th>Hours/week (inc. PC)</th>
+                    <th>LTFT basic salary band</th>
+                    <th>Basic salary: fraction of FT equiv.</th>
+                    <th>Banding</th>
+                    <th>Supplement</th>
+        """
+        html = """
+            <h2>Bandings</h2>
+            <h3>In brief</h3>
+            {common_table_start}
+                </tr>
+                {brieftable}
+            </table>
+        """.format(common_table_start=common_table_start,
+                   brieftable=brieftable,
+                   fulltable=fulltable)
+        if working:
+            html += """
+                <h3>In full</h3>
+                <table>
+                {common_table_start}
+                        <th>Working (banding flowchart)</th>
+                        <th>Calculations (not all will be relevant)</th>
+                    </tr>
+                    {fulltable}
+                </table>
+            """.format(common_table_start=common_table_start,
+                       brieftable=brieftable,
+                       fulltable=fulltable)
         return html
 
 
@@ -4095,6 +4123,169 @@ def cpft_draft_4_split():
     )
 
 
+def cpft_draft_5_split():
+    """
+    RNC draft for CPFT Aug 2015, North + South.
+    Wholly split SpR pattern.
+    Shortens night shift to 12 hours.
+    """
+    # Shifts
+    nwd = Shift(
+        "Normal_working_day", "nwd", datetime.time(9), 8, nwd_only=True,
+        resident=True, rgb=COLOURS.NWD)
+    s_sho_late1 = Shift(
+        "S_SHO_Late_1_F", "F", datetime.time(9), 12.5,
+        roles=["Fulbourn SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_F)
+    s_sho_late2 = Shift(
+        "S_SHO_Late_2_A", "A", datetime.time(9), 12.5,
+        roles=["Addenbrooke’s SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_A)
+    s_sho_night = Shift(
+        "S_SHO_Night", "N", datetime.time(21, 15), 12,
+        roles=["Fulbourn SHO", "Addenbrooke’s SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.NIGHT_FA)
+    s_spr_late = Shift(
+        "S_SpR_Late", "L", datetime.time(9), 12.5,
+        roles=["South SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.S_SPR_LATE)
+    s_spr_night = Shift(
+        "S_SpR_Night", "N", datetime.time(21, 15), 12,
+        roles=["South SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.S_SPR_NIGHT)
+
+    n_sho_late1 = Shift(
+        "N_SHO_Late_1_CC", "C", datetime.time(9), 12.5,
+        roles=["Cavell Centre SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_C)
+    n_sho_late2 = Shift(
+        "N_SHO_Late_2_PCH", "P", datetime.time(9), 12.5,
+        roles=["PCH SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.LATE_P)
+    n_sho_night = Shift(
+        "N_SHO_Night", "N", datetime.time(21, 15), 12,
+        roles=["Cavell Centre SHO", "PCH SHO"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.NIGHT_CP)
+    n_spr_late = Shift(
+        "N_SpR_Late", "L", datetime.time(9), 12.5,
+        roles=["North SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.N_SPR_LATE)
+    n_spr_night = Shift(
+        "N_SpR_Night", "N", datetime.time(21, 15), 12,
+        roles=["North SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.FULL, rgb=COLOURS.N_SPR_NIGHT)
+
+    off = Shift(
+        "Off", "OFF", datetime.time(9, 15), 7.75, work=False)
+    shifts = [nwd,
+              s_sho_late1, s_sho_late2, s_sho_night, s_spr_late, s_spr_night,
+              n_sho_late1, n_sho_late2, n_sho_night, n_spr_late, n_spr_night,
+              off]
+
+    # Doctors
+    south_base_sho = Doctor("South prototype SHO", [
+        # Pattern fiddled with a bit to make it more comparable to new
+        # North SHO, and even the nights out a bit.
+        s_sho_night, s_sho_night, s_sho_night, s_sho_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        s_sho_late1, s_sho_late1, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, s_sho_late1, s_sho_late1, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, s_sho_late1, s_sho_late1, s_sho_late1,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, s_sho_night, s_sho_night, s_sho_night,
+        off, off, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        s_sho_late2, s_sho_late2, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, s_sho_late2, s_sho_late2, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, s_sho_late2, s_sho_late2, s_sho_late2,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=5)
+    south_shos = south_base_sho.make_group("S")
+    assert(len(south_shos) == 14)
+
+    # Doctors
+    north_base_sho = Doctor("North prototype SHO", [
+        # The same pattern as the South fails (i.e. yields 2B) because there
+        # are slightly fewer doctors. Fixed by adding OFF shifts.
+        # Also changed so two weeks of nights don't get too close to each
+        # other.
+        n_sho_night, n_sho_night, n_sho_night, n_sho_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        n_sho_late1, n_sho_late1, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, n_sho_late1, n_sho_late1, off, nwd, nwd,  # INSERT OFF
+        nwd, nwd, nwd, off, n_sho_late1, n_sho_late1, n_sho_late1,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, off, n_sho_night, n_sho_night, n_sho_night,
+        off, off, nwd, nwd, nwd, nwd, nwd,
+        n_sho_late2, n_sho_late2, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, n_sho_late2, n_sho_late2, off, nwd, nwd,  # INSERT OFF
+        nwd, nwd, nwd, off, n_sho_late2, n_sho_late2, n_sho_late2,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=5)
+    north_shos = north_base_sho.make_group("N")
+    assert(len(north_shos) == 12)
+
+    north_base_spr = Doctor("North prototype SpR", [
+        # Reaching band 2
+        nwd, nwd, n_spr_late, n_spr_late, off, nwd, nwd,  # INSERT OFF
+        n_spr_late, n_spr_late, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        n_spr_night, n_spr_night, n_spr_night, n_spr_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, n_spr_late, n_spr_late, n_spr_late,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, n_spr_night, n_spr_night, n_spr_night,
+        off, off, nwd, nwd, nwd, nwd, nwd,  # INSERT OFF
+    ], leave_weeks_per_year=6)
+    north_sprs = north_base_spr.make_group("NR", n=9)
+
+    south_base_spr = Doctor("South prototype SpR", [
+        # Mon ... Sun
+        nwd, nwd, s_spr_late, s_spr_late, off, nwd, nwd,  # INSERT OFF
+        s_spr_late, s_spr_late, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        s_spr_night, s_spr_night, s_spr_night, s_spr_night, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, s_spr_late, s_spr_late, s_spr_late,
+        nwd, nwd, nwd, nwd, nwd, nwd, nwd,
+        nwd, nwd, nwd, nwd, s_spr_night, s_spr_night, s_spr_night,
+        off, off, nwd, nwd, nwd, nwd, nwd,  # INSERT OFF
+    ], leave_weeks_per_year=6)
+    south_sprs = south_base_spr.make_group("SR", n=9)
+
+    doctors = north_shos + north_sprs + south_sprs + south_shos
+
+    return Rota(
+        "CPFT draft 5, split North/South SpRs in evenings, combined "
+        "North/South SpRs at night", shifts, doctors,
+        start_date=datetime.date(2015, 8, 5),  # Wednesday
+        nwd_shifts=[nwd],
+        prototypes=[south_base_sho, north_base_sho,
+                    north_base_spr, south_base_spr],
+        comments=[
+            "<b>Synopsis:</b> North and South SpRs are fully split.",
+            "<b>Author:</b> Rudolf Cardinal, Aug 2015.",
+            "<b>Banding:</b> estimated at 1B (40%) for South SHOs and all "
+            "SpRs, and 1A (50%) for North SHOs.",
+            "<b>See also drafts 2/3/4.</b>",
+            "Night shift shortened from 12.25 to 12 hours.",
+            "Slightly nicer North SHO pattern than previous drafts "
+            "(re nights), and South SHO amended similarly.",
+            "<b>Three SpRs who are South by day will be North at night, "
+            "and considered North in this pattern.</b>",
+            "SpRs require 1 extra day off (cf. draft 4) to avoid Band 2.",
+            """NWD coverage compared to Aug 2015 actual:
+                <ul>
+                    <li>North SHOs improve from 54–61% to 59–64%.</li>
+                    <li>South SHOs worsen from 71–76% to 68–73%.</li>
+                    <li>SpRs improve a little from 56–60% (North)
+                    and 71–74% (South) to 67–72%.</li>
+                </ul>
+            """,
+        ],
+    )
+
 # =============================================================================
 # Rota map
 # =============================================================================
@@ -4108,19 +4299,18 @@ ROTA_GENERATORS = OrderedDict([
     ('cpft_draft_2_combined', cpft_draft_2_combined),
     ('cpft_draft_3_split', cpft_draft_3_split),
     ('cpft_draft_4_split', cpft_draft_4_split),
+    ('cpft_draft_5_split', cpft_draft_5_split),
 ])
 
 
-def process_rota(rotaname, daynums=False, analyses=True,
-                 prototypes=True, diary=True):
+def process_rota(rotaname, **kwargs):
     """Sends a rota to an HTML file."""
     if rotaname not in ROTA_GENERATORS:
         raise ValueError("Invalid rota: " + rotaname)
     fn = ROTA_GENERATORS[rotaname]
     rota = fn()
     filename = rotaname + ".html"
-    rota.print_html(filename, daynums=daynums, analyses=analyses,
-                    prototypes=prototypes, diary=diary)
+    rota.print_html(filename, **kwargs)
 
 
 # =============================================================================
@@ -4155,25 +4345,31 @@ Version {}
     parser.add_argument(
         "-p", "--noprototypes", action="store_true",
         help="Skip doctor prototype patterns")
+    parser.add_argument(
+        "-s", "--noshiftcounts", action="store_true",
+        help="Skip shift counts by doctor")
+    parser.add_argument(
+        "-w", "--noworking", action="store_true",
+        help="Skip working for banding calculations")
     args = parser.parse_args()
 
+    kwargs = {  # see get_html_body
+        "daynums": args.daynums,
+        "analyses": not args.nocalc,
+        "prototypes": not args.noprototypes,
+        "diary": not args.nodiary,
+        "working": not args.noworking,
+        "shiftcounts": not args.noshiftcounts,
+    }
     if args.all:
         for rotaname in ROTA_GENERATORS.keys():
-            process_rota(rotaname,
-                         daynums=args.daynums,
-                         analyses=not args.nocalc,
-                         prototypes=not args.noprototypes,
-                         diary=not args.nodiary)
+            process_rota(rotaname, **kwargs)
     else:
         if not args.rota:
             parser.print_help()
             sys.exit(1)
         for rotaname in args.rota:
-            process_rota(rotaname,
-                         daynums=args.daynums,
-                         analyses=not args.nocalc,
-                         prototypes=not args.noprototypes,
-                         diary=not args.nodiary)
+            process_rota(rotaname, **kwargs)
 
 
 # =============================================================================
