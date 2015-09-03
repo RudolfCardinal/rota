@@ -63,13 +63,18 @@ Version history (see VERSION below)
     - Bugfix: working for "Weekends ≥1:4?" was displaying the result for
       "Weekends ≥1:3?" (though corresponding banding calculation was correct).
     - Brief summary of bandings, as well as full version.
+
+    1.5 (2015-09-03)
+    - Improvement of partial shift calculations.
+    - Bugfix (one_48h_and_one_62h_off_every_28d_ffi).
+    - Fixed error in doctors 23/24 of cpft_actual_aug2015_south().
 """
 
 # =============================================================================
 # Version
 # =============================================================================
 
-VERSION = 1.4
+VERSION = 1.5
 
 # =============================================================================
 # Imports
@@ -169,6 +174,17 @@ SHIFT_TYPES = AttrDict({
     "ONCALL": "On-call",
     "NONE": None,
 })
+
+REST_TIMING = {
+    SHIFT_TYPES.FULL: "At least 30min continuous rest after ~4h duty (ND)",
+    SHIFT_TYPES.PARTIAL: "25% of out-of-hours duty, at any time "
+    "(frequent short periods of rest not acceptable) (ND)",
+    SHIFT_TYPES.PARTIAL24: "6 hours’ rest, of which 4 hours’ "
+    "continuous rest between 10pm and 8am (ND)",
+    SHIFT_TYPES.ONCALL: "50% of out-of-hours duty period as rest (if "
+    "only 8–12 hours rest at weekend then compensatory rest); at "
+    "least 5h between 10pm and 8am (ND)",
+}
 
 SECONDS_PER_MINUTE = 60
 MINUTES_PER_HOUR = 60
@@ -497,8 +513,12 @@ class Interval(object):
     def duration_outside_nwh(self,
                              starttime=datetime.time(NORMAL_DAY_START_H),
                              endtime=datetime.time(NORMAL_DAY_END_H)):
-        """Returns a duration (a datetime.timedelta object) representing the
-        number of hours outside normal working hours."""
+        """
+        Returns a duration (a datetime.timedelta object) representing the
+        number of hours outside normal working hours.
+            This is not simply a subset of day_night_duration(), because
+        weekends are treated differently.
+        """
         ooh = datetime.timedelta()  # ooh = out of (normal) hours
         startdate = self.start.date()
         enddate = self.end.date()
@@ -775,7 +795,7 @@ class IntervalList(object):
             return None
         return self.intervals[-1].end.date()
 
-    def max_continuous_days(self):
+    def max_consecutive_days(self):
         """
         The length of the longest sequence of days in which all days include
         an interval. Returns a tuple: (length, interval with start and end
@@ -1144,7 +1164,8 @@ class BandingInfo(object):
     def __init__(self, rota_interval, shift_types, prospective_cover,
                  ltft, leave_weeks_per_year, hours_per_leave_week,
                  workpattern, n_on_calls,
-                 resident, resident_after_7pm, work4h_after7pm_halformore):
+                 resident, resident_after_7pm, work4h_after7pm_halformore,
+                 allow_wtr_breach=False):
         """Initializes the BandingInfo object.
 
         rota_interval: Interval from the rota start date to the rota end
@@ -1162,6 +1183,8 @@ class BandingInfo(object):
         resident: is the doctor resident?
         resident_after_7pm: is the doctor resident after 7pm?
         work4h_after7pm_halformore: ... for on-call rotas
+
+        allow_wtr_breach: allow Working Time Regulation breaches?
         """
         self.rota_interval = rota_interval
         self.shift_types = shift_types
@@ -1174,6 +1197,7 @@ class BandingInfo(object):
         self.resident = resident
         self.resident_after_7pm = resident_after_7pm
         self.work4h_after7pm_halformore = work4h_after7pm_halformore
+        self.allow_wtr_breach = allow_wtr_breach
         # ---------------------------------------------------------------------
         # Calculations follow.
         # ---------------------------------------------------------------------
@@ -1322,9 +1346,9 @@ class BandingInfo(object):
         self.min_rest_between_duties_h = \
             self.min_rest_between_duties_interval.duration_in('h')
         (
-            self.max_continuous_duty_days,
-            self.max_continuous_duty_interval
-        ) = workpattern.max_continuous_days()
+            self.max_consecutive_duty_days,
+            self.max_consecutive_duty_interval
+        ) = workpattern.max_consecutive_days()
 
         # _ffi: first failure interval
         (
@@ -1363,59 +1387,97 @@ class BandingInfo(object):
                                             ])
 
         # (ii) New Deal / EWTD compliance
+        # Best source: [NHS_3, BMA_2, RCS_1]
 
         self.rest_compliant = True  # May be changed below.
-        # (a) Working hours
-        if self.hours_per_week_inc_pc > 56:
+
+        # (a) Hours per week
+        if (self.main_shift_type in [SHIFT_TYPES.FULL]
+                and self.hours_per_week_inc_pc > 56):
             self.rest_compliant = False
-            self.decide("ND fail: >56 h/week on average (inc. PC)")
+            self.decide("ND fail: full shift and >56 h/week on average "
+                        "(inc. PC)")
+        if (self.main_shift_type in [SHIFT_TYPES.PARTIAL,
+                                     SHIFT_TYPES.PARTIAL24]
+                and self.hours_per_week_inc_pc > 64):
+            self.rest_compliant = False
+            self.decide("ND fail: partial/24h-partial shift and >64 h/week on "
+                        "average (inc. PC)")
+        if (self.main_shift_type in [SHIFT_TYPES.ONCALL]
+                and self.hours_per_week_inc_pc > 72):
+            self.rest_compliant = False
+            self.decide("ND fail: on-call and >72 h/week on average "
+                        "(inc. PC)")
+        if self.hours_per_week_inc_pc > 56 and self.rest_compliant:
+            self.decide("ASSUMPTION: contractually ND compliant at >56h/week "
+                        "but actual hours must still be ≤56")
         if self.hours_per_week_inc_pc > 48:
-            # rest_compliant = False
-            self.decide("WARNING: WTR fail: >48 h/week on average "
-                        "(inc. PC); PROCEEDING ANYWAY.")
+            if self.allow_wtr_breach:
+                self.decide("WARNING: WTR (2009) fail: >48 h/week on average "
+                            "(inc. PC); proceeding anyway to allow "
+                            "calculation of bands above band 1.")
+            else:
+                rest_compliant = False
+                self.decide("WTR (2009) fail: >48 h/week on average (inc. PC)")
+
+        # (b) Continuous hours, consecutive days
         if self.max_continuous_hours > 13:
+            if allow_wtr_breach:
+                self.decide(
+                    "WARNING: WTR fail: >13 continuous hours (will need "
+                    "compensatory rest) (first failure: {}), but proceeding "
+                    "anyway".format(
+                        self.max_continuous_hours_interval))
+            else:
+                self.rest_compliant = False
+                self.decide(
+                    "WTR FAIL: >13 continuous hours (would need compensatory "
+                    "rest) (first failure: {})".format(
+                        self.max_continuous_hours_interval))
+        if self.max_consecutive_duty_days > 13:
             self.rest_compliant = False
             self.decide(
-                "WTR fail: >13 continuous hours (would need compensatory rest)"
-                " (first failure: {})".format(
-                    self.max_continuous_hours_interval))
+                "WTR FAIL: >13 consecutive duty days "
+                "(first failure: {})".format(
+                    self.max_consecutive_duty_interval))
+
+        # (c) Time off between shifts
         if self.main_shift_type in [SHIFT_TYPES.FULL, SHIFT_TYPES.PARTIAL,
                                     SHIFT_TYPES.PARTIAL24]:
             if self.min_rest_between_duties_h < 11:
                 self.rest_compliant = False
                 self.decide(
-                    "WTR fail: <11 h rest between duties (would need "
+                    "WTR FAIL: <11 h rest between duties (would need "
                     "compensatory rest) (first failure: {}".format(
                         self.min_rest_between_duties_interval))
         elif self.main_shift_type == SHIFT_TYPES.ONCALL:
             if self.min_rest_between_duties_h < 12:
                 self.rest_compliant = False
                 self.decide(
-                    "ND/WTR fail: <12 h rest between duties "
+                    "ND/WTR FAIL: <12 h rest between duties "
                     "(first failure: {})".format(
                         self.min_rest_between_duties_interval))
 
-        # (b) Time off
         if self.main_shift_type in [SHIFT_TYPES.FULL, SHIFT_TYPES.PARTIAL,
                                     SHIFT_TYPES.PARTIAL24]:
             if not self.one_48h_and_one_62h_off_every_28d:
                 self.rest_compliant = False
                 self.decide(
-                    "ND fail: does not provide one period of 48h off and one "
+                    "ND FAIL: does not provide one period of 48h off and one "
                     "period of 62h off every 28 days "
                     "(first failure: {})".format(
-                        one_48h_and_one_62h_off_every_28d_ffi))
+                        self.one_48h_and_one_62h_off_every_28d_ffi))
         elif self.main_shift_type == SHIFT_TYPES.ONCALL:
             if not self.one_48h_and_one_62h_off_every_21d:
                 self.rest_compliant = False
                 self.decide(
-                    "ND fail: does not provide one period of 48h off and one "
+                    "ND FAIL: does not provide one period of 48h off and one "
                     "period of 62h off every 21 days "
                     "(first failure: {})".format(
                         one_48h_and_one_62h_off_every_21d_ffi))
         if not(self.off_24h_every_7d or self.off_48h_every_14d):
             self.rest_compliant = False
-            msg = "WTR fail: not 24h off every 7d, or 48h off every 14d"
+            msg = "WTR FAIL: not 24h off every 7d, or 48h off every 14d"
             if not self.off_24h_every_7d:
                 msg += " (24h q7d first failure: {})".format(
                     self.off_24h_every_7d_ffi)
@@ -1423,17 +1485,13 @@ class BandingInfo(object):
                 msg += " (48h q14d first failure: {})".format(
                     self.off_48h_every_14d_ffi)
             self.decide(msg)
-        if self.max_continuous_duty_days > 13:
-            self.rest_compliant = False
-            self.decide(
-                "WTR fail: >13 continuous duty days "
-                "(first failure: {})".format(
-                    self.max_continuous_duty_interval))
 
-        # (c) Rest at work
-        self.decide("Natural breaks assumed OK")
-        self.decide("Minimum rest assumed OK")
-        self.decide("Timing of continuous rest assumed OK")
+        # (d) Rest at work
+        self.decide("ASSUMPTION: Natural breaks assumed OK "
+                    "(30min after 4h work)")
+        self.decide("ASSUMPTION: Minimum rest and timing of continuous rest "
+                    "assumed OK. Requirements: " +
+                    REST_TIMING[self.main_shift_type])
 
         # ---------------------------------------------------------------------
         # Key calculated information
@@ -1466,7 +1524,8 @@ class BandingInfo(object):
             "n_on_calls={n_on_calls}, "
             "resident={resident}, "
             "resident_after_7pm={resident_after_7pm}, "
-            "work4h_after7pm_halformore={work4h_after7pm_halformore})"
+            "work4h_after7pm_halformore={work4h_after7pm_halformore}, "
+            "allow_wtr_breach={allow_wtr_breach})"
             "".format(
                 rota_interval=repr(self.rota_interval),
                 shift_types=repr(self.shift_types),
@@ -1479,6 +1538,7 @@ class BandingInfo(object):
                 resident=self.resident,
                 resident_after_7pm=self.resident_after_7pm,
                 work4h_after7pm_halformore=self.work4h_after7pm_halformore,
+                allow_wtr_breach=self.allow_wtr_breach,
             )
         )
 
@@ -1528,6 +1588,7 @@ class BandingInfo(object):
             Rota weekends: <b>{rota_weekends}</b>.
             Shift types <i>(*)</i>: <b>{shift_types}</b>.
             Main shift type: <b>{main_shift_type}</b>.
+            Allow WTR breaches: <b>{allow_wtr_breach}</b>.
 
             <i>LTFT.</i>
             Less-than-full-time <i>(*)</i>? <b>{ltft}</b>.
@@ -1607,10 +1668,10 @@ class BandingInfo(object):
                 <b>{min_rest_between_duties_h}</b>.
             Interval containing minimum rest between duty:
                 <b>{min_rest_between_duties_interval}</b>.
-            Maximum continuous duty (days):
-                <b>{max_continuous_duty_days}</b>.
-            Interval containing maximum continuous duty:
-                <b>{max_continuous_duty_interval}</b>.
+            Maximum consecutive duty (days):
+                <b>{max_consecutive_duty_days}</b>.
+            Interval containing maximum consecutive days:
+                <b>{max_consecutive_duty_interval}</b>.
             Off 24h every 7 days?
                 <b>{off_24h_every_7d}</b>.
             Off-24h-every-7-days first failure interval:
@@ -1637,6 +1698,7 @@ class BandingInfo(object):
             rota_weekends=self.rota_weekends,
             shift_types=", ".join(self.shift_types),
             main_shift_type=self.main_shift_type,
+            allow_wtr_breach=yesno(self.allow_wtr_breach),
 
             ltft=yesno(self.ltft),
 
@@ -1702,9 +1764,9 @@ class BandingInfo(object):
             min_rest_between_duties_h=self.min_rest_between_duties_h,
             min_rest_between_duties_interval=str(
                 self.min_rest_between_duties_interval),
-            max_continuous_duty_days=self.max_continuous_duty_days,
-            max_continuous_duty_interval=str(
-                self.max_continuous_duty_interval),
+            max_consecutive_duty_days=self.max_consecutive_duty_days,
+            max_consecutive_duty_interval=str(
+                self.max_consecutive_duty_interval),
             off_24h_every_7d=yesno(self.off_24h_every_7d),
             off_24h_every_7d_ffi=str(self.off_24h_every_7d_ffi),
             off_48h_every_14d=yesno(self.off_48h_every_14d),
@@ -1987,6 +2049,19 @@ class Doctor(object):
             )
         )
 
+    def get_quick_pattern_string(self):
+        """Returns a short string representing the pattern."""
+        s = ""
+        maxlen = max([len(shift.abbreviation) for shift in self.daypattern])
+        for i, shift in enumerate(self.daypattern):
+            c = i % 7
+            if c > 0:
+                s += ","
+            s += shift.abbreviation.ljust(maxlen)
+            if c == 6:
+                s += "  # {}-{}\n".format(i - c + 1, i + 1)
+        return s
+
     def make_group(self, prefix, rotation_days=7, n=None):
         """Returns a list of n Doctor objects, each cloned from this one, each
         numbered (from 1) with a prefix, and each successively rotated by
@@ -2165,7 +2240,8 @@ class Doctor(object):
                            self.hours_per_leave_week,
                            workpattern, n_on_calls,
                            resident, resident_after_7pm,
-                           rota.work4h_after7pm_halformore)
+                           rota.work4h_after7pm_halformore,
+                           allow_wtr_breach=rota.allow_wtr_breach)
 
     def get_shift_types(self):
         """Returns a set of shift patterns worked by this doctor."""
@@ -2225,7 +2301,8 @@ class Rota(object):
                  work4h_after7pm_halformore=True,
                  doctor_patterns_weekday_based=True,
                  doctor_patterns_start_weekday=0,  # Monday
-                 comments=None):
+                 comments=None,
+                 allow_wtr_breach=False):
         """
         Initializes the rota.
 
@@ -2249,6 +2326,7 @@ class Rota(object):
             on the start date of the rota.
         comments: a list of HTML objects to be inserted in a <ul> of comments,
             or None.
+        allow_wtr_breach: allow Working Time Regulations breach
         """
         self.name = name
         self.shifts = shifts
@@ -2264,6 +2342,7 @@ class Rota(object):
         self.doctor_patterns_weekday_based = doctor_patterns_weekday_based
         self.doctor_patterns_start_weekday = doctor_patterns_start_weekday % 7
         self.comments = [] if comments is None else comments
+        self.allow_wtr_breach = allow_wtr_breach
         # Special case if end_date is None:
         if end_date is None:
             maxlen = max([d.get_pattern_length() for d in self.doctors])
@@ -2290,12 +2369,14 @@ class Rota(object):
             "start_date={}, end_date={}, prospective_cover={}, "
             "work4h_after7pm_halformore={}, "
             "doctor_patterns_weekday_based={}, "
-            "doctor_patterns_start_weekday={})".format(
+            "doctor_patterns_start_weekday={}, "
+            "allow_wtr_breach={})".format(
                 repr(self.name), self.shifts, self.doctors, self.nwd_shifts,
                 self.start_date, self.end_date, self.prospective_cover,
                 self.work4h_after7pm_halformore,
                 self.doctor_patterns_weekday_based,
                 self.doctor_patterns_start_weekday,
+                self.allow_wtr_breach,
             )
         )
 
@@ -2426,6 +2507,10 @@ class Rota(object):
             }
             .weekend {
                 background-color: rgb(200, 200, 200);
+            }
+            .warning {
+                font-weight: bold;
+                background-color: rgb(255, 102, 0);
             }
         """
         for s in self.shifts:
@@ -2581,8 +2666,17 @@ class Rota(object):
                 <a href="{nhs_2}">Junior doctors’ hours – monitoring
                 guidance</a></li>
 
-                <li>[RCP_1] RCP London (2006) <a href="{rcp_1}">Designing safer
-                rotas for junior doctors</a></li>
+                <li>[NHS_3] Department of Health (2013? earlier?)
+                <a href="{nhs_3}">Hours of work and rest requirements – a
+                comparison</a></li>
+
+                <li>[RCP_1] Royal College of Physicians of London (2006)
+                <a href="{rcp_1}">Designing safer rotas for junior
+                doctors</a></li>
+
+                <li>[RCS_1] Royal College of Surgeons of England (2008)
+                <a href="{rcs_1}">Working Time Directive 2009: Meeting the
+                challenge in surgery</a></li>
 
                 <li>[OHFP] Oxford Handbook for the Foundation Programme, 2014,
                 fourth edition. Oxford University Press.</li>
@@ -2618,13 +2712,16 @@ class Rota(object):
             bma_6="http://bma.org.uk/practical-support-at-work/pay-fees-allowances/pay-scales/juniors-england",  # noqa
             bma_7="http://bma.org.uk/practical-support-at-work/contracts/juniors-contracts/rotas-and-working-patterns/rota-template-and-riddell-calculator",  # noqa
             bma_8="https://bma.org.uk/practical-support-at-work/pay-fees-allowances/pay-banding/how-does-it-work",  # noqa
-            rcp_1="https://www.rcplondon.ac.uk/sites/default/files/documents/designing_safer_rotasweb.pdf",  # noqa
             nhs_1="http://www.nhsemployers.org/~/media/Employers/Documents/Pay%20and%20reward/Terms_and_Conditions_of_Service_NHS_Medical_and_Dental_Staff_300813_bt.pdf",  # noqa
             nhs_2="http://www.dhsspsni.gov.uk/de/print/jdcmonitoring.pdf",
+            nhs_3="http://webarchive.nationalarchives.gov.uk/20130107105354/http://www.dh.gov.uk/assetRoot/04/07/55/53/04075553.pdf",  # noqa
+            rcp_1="https://www.rcplondon.ac.uk/sites/default/files/documents/designing_safer_rotasweb.pdf",  # noqa
+            rcs_1="http://www.rcseng.ac.uk/surgeons/surgical-standards/docs/WTD%202009%20Meeting%20the%20challenge%20in%20surgery.pdf",  # noqa
         )
 
     def get_html_rota_settings(self):
         """HTML for rota-wide settings."""
+        wtrclass = ' class="warning"' if self.allow_wtr_breach else ''
         return """
             <h2>Rota-wide settings</h2>
             <table>
@@ -2649,12 +2746,18 @@ class Rota(object):
                         occasions</td>
                     <td>{work4h_after7pm_halformore}</td>
                 </tr>
+                <tr>
+                    <td>Allow breaches of the Working Time Regulations?</td>
+                    <td{wtrclass}>{allow_wtr_breach}</td>
+                </tr>
             </table>
         """.format(
             start_date=formatdt(self.start_date, include_time=False),
             end_date=formatdt(self.end_date, include_time=False),
             prospective_cover=yesno(self.prospective_cover),
             work4h_after7pm_halformore=yesno(self.work4h_after7pm_halformore),
+            wtrclass=wtrclass,
+            allow_wtr_breach=yesno(self.allow_wtr_breach),
         )
 
     def get_html_shifts(self):
@@ -3196,8 +3299,8 @@ def cpft_actual_aug2015_south():
     doctors[23].set_at(93, NIGHT2_FSS)
     doctors[23].set_at(104, LATE3_MTWT)
     doctors[24].set_at(86, NIGHT1_FSS)
-    doctors[23].set_at(97, LATE3_MTWT)
-    doctors[23].set_at(104, NWD * 4)  # remove LATE3_MTWT
+    doctors[24].set_at(97, LATE3_MTWT)
+    doctors[24].set_at(104, NWD * 4)  # remove LATE3_MTWT
     doctors[24].set_at(143, NWD * 4)  # remove LATE2_FSS, *then*...
     doctors[24].set_at(139, NIGHT1_MTWT)
     doctors[24].set_at(160, NWD * 4)  # remove NIGHT1_MTWT
@@ -3205,6 +3308,8 @@ def cpft_actual_aug2015_south():
     doctors[25].set_at(150, NWD * 4)  # remove LATE2_FSS
     doctors[25].set_at(157, LATE1_FSS)
     doctors[26].set_at(149, NIGHT1_FSS)
+    # logger.info("\n" + doctors[23].get_quick_pattern_string())
+
     # Remove the basedoc (only present for temporary 1-based indexing!)
     doctors = doctors[1:]
 
@@ -3325,6 +3430,7 @@ def cpft_actual_aug2015_north():
             "<b>Supplement cost:</b> 12 × 0.5 = 6 SHOs + 6 × 0.5 = 3 SpRs, or "
             "approx. £305,000.",
         ],
+        allow_wtr_breach=True,
     )
 
 
@@ -3965,6 +4071,14 @@ def cpft_draft_3_split():
             "complete, since North SpRs regularly cover Cambridge s136 work "
             "for the evening shifts.",
             "Remains Band 1B with 8+8 SpRs; not with 7+7.",
+            """NWD coverage compared to Aug 2015 actual:
+                <ul>
+                    <li>North SHOs improve from 54–61% to 60–64%.</li>
+                    <li>South SHOs worsen from 71–76% to 68–73%.</li>
+                    <li>SpRs improve from 56–60% (North)
+                    and 71–74% (South) to 75–83%.</li>
+                </ul>
+            """,
         ],
     )
 
@@ -4135,6 +4249,14 @@ def cpft_draft_4_split():
             "<b>See also drafts 2/3.</b>",
             "<b>Three SpRs who are South by day will be North at night, "
             "and considered North in this pattern.</b>",
+            """NWD coverage compared to Aug 2015 actual:
+                <ul>
+                    <li>North SHOs improve from 54–61% to 60–64%.</li>
+                    <li>South SHOs worsen from 71–76% to 68–73%.</li>
+                    <li>SpRs improve from 56–60% (North)
+                    and 71–74% (South) to 75–81%.</li>
+                </ul>
+            """,
         ],
     )
 
@@ -4301,6 +4423,76 @@ def cpft_draft_5_split():
         ],
     )
 
+
+def cpft_draft_6_spr_partial_split():
+    """
+    RNC draft for CPFT Sep 2015, North + South SpRs.
+    Attempting a 24-hour partial shift.
+    SHOs excluded (as they're full shift, analyse them separately).
+    """
+    # Shifts
+    nwd = Shift(
+        "Normal_working_day", "nwd", datetime.time(9), 8, nwd_only=True,
+        resident=True, rgb=COLOURS.NWD)
+    s_spr_oncall = Shift(
+        "S_SpR_Partial", "R", datetime.time(9), 24,
+        roles=["South SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.PARTIAL24,
+        rgb=COLOURS.S_SPR_NIGHT)
+    n_spr_oncall = Shift(
+        "N_SpR_Partial", "R", datetime.time(9), 24,
+        roles=["North SpR", "Section 12 approved"],
+        resident=True, shift_type=SHIFT_TYPES.PARTIAL24,
+        rgb=COLOURS.N_SPR_NIGHT)
+
+    off = Shift(
+        "Off", "OFF", datetime.time(9, 15), 7.75, work=False)
+    shifts = [nwd, s_spr_oncall, n_spr_oncall, off]
+
+    # Doctors
+    north_base_spr = Doctor("North prototype SpR", [
+        n_spr_oncall, off, nwd, nwd, nwd, nwd, nwd,
+        nwd, n_spr_oncall, off, nwd, nwd, nwd, nwd,
+        nwd, nwd, n_spr_oncall, off, nwd, nwd, nwd,
+        nwd, nwd, nwd, n_spr_oncall, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, n_spr_oncall, off, nwd,
+        nwd, nwd, nwd, nwd, nwd, n_spr_oncall, off,
+        off, off, off, off, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, n_spr_oncall,
+        off, nwd, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=6)
+    north_sprs = north_base_spr.make_group("NR", n=9)
+
+    south_base_spr = Doctor("South prototype SpR", [
+        s_spr_oncall, off, nwd, nwd, nwd, nwd, nwd,
+        nwd, s_spr_oncall, off, nwd, nwd, nwd, nwd,
+        nwd, nwd, s_spr_oncall, off, nwd, nwd, nwd,
+        nwd, nwd, nwd, s_spr_oncall, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, s_spr_oncall, off, nwd,
+        nwd, nwd, nwd, nwd, nwd, s_spr_oncall, off,
+        off, off, off, off, off, nwd, nwd,
+        nwd, nwd, nwd, nwd, nwd, nwd, s_spr_oncall,
+        off, nwd, nwd, nwd, nwd, nwd, nwd,
+    ], leave_weeks_per_year=6)
+    south_sprs = south_base_spr.make_group("SR", n=9)
+
+    doctors = north_sprs + south_sprs
+
+    return Rota(
+        "CPFT draft 6, SpR only, split North/South SpRs throughout, "
+        "24h partial shift",
+        shifts, doctors,
+        start_date=datetime.date(2015, 8, 5),  # Wednesday
+        nwd_shifts=[nwd],
+        prototypes=[north_base_spr, south_base_spr],
+        comments=[
+            "<b>Synopsis:</b> North and South SpRs are fully split, on 24h "
+            "partial shifts.",
+            "<b>Author:</b> Rudolf Cardinal, Sep 2015.",
+        ],
+        allow_wtr_breach=True,  # only works with this!
+    )
+
 # =============================================================================
 # Rota map
 # =============================================================================
@@ -4315,6 +4507,7 @@ ROTA_GENERATORS = OrderedDict([
     ('cpft_draft_3_split', cpft_draft_3_split),
     ('cpft_draft_4_split', cpft_draft_4_split),
     ('cpft_draft_5_split', cpft_draft_5_split),
+    ('cpft_draft_6_spr_partial_split', cpft_draft_6_spr_partial_split),
 ])
 
 
